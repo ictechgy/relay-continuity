@@ -251,9 +251,14 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
         params![now],
         |r| r.get(0),
     )?;
+    let current_assertions: i64 = c.query_row(
+        "SELECT COUNT(*) FROM assertions WHERE snapshot = ?1",
+        params![now],
+        |r| r.get(0),
+    )?;
     if broken > 0 {
         state = "BROKEN";
-    } else if state == "FRESH" && prior > 0 {
+    } else if state == "FRESH" && prior > 0 && current_assertions == 0 {
         state = "STALE";
     }
     let note: String = c
@@ -461,6 +466,53 @@ mod tests {
         observe(&root, &c).unwrap();
         fs::write(root.join("a.txt"), "two").unwrap();
         assert!(card(&root, &c).unwrap().contains("STATUS: STALE"));
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn current_check_revalidates_after_a_stale_assertion() {
+        let root = env::temp_dir().join(format!(
+            "relay-revalidate-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        fs::write(root.join("a.txt"), "one").unwrap();
+        Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.email=a@b.c",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        let c = db(&root).unwrap();
+        observe(&root, &c).unwrap();
+        record_check(&root, &c, 0, "true").unwrap();
+        fs::write(root.join("a.txt"), "two").unwrap();
+        observe(&root, &c).unwrap();
+        assert!(card(&root, &c).unwrap().contains("STATUS: STALE"));
+        assert!(
+            record_check(&root, &c, 0, "true")
+                .unwrap()
+                .contains("STATUS: FRESH")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }
