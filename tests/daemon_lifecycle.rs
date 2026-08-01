@@ -386,7 +386,9 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     drop(database);
     let hook = run(&root, &["shell", "zsh"]);
     assert!(hook.status.success());
-    assert!(String::from_utf8_lossy(&hook.stdout).contains("record-check"));
+    let hook_text = String::from_utf8_lossy(&hook.stdout);
+    assert!(hook_text.contains("record-check-stdin"));
+    assert!(!hook_text.contains("$(fc -ln -1)"));
 
     assert!(run(&root, &["daemon", "stop"]).status.success());
     assert!(

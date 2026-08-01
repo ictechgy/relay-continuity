@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     env,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{RecvTimeoutError, channel},
@@ -523,13 +523,13 @@ fn explain_epochs(c: &Connection) -> rusqlite::Result<String> {
 fn shell_hook(shell: &str) -> Result<&'static str, Box<dyn std::error::Error>> {
     match shell {
         "zsh" => Ok(
-            "function _relay_capture() { local status=$?; relay record-check \"$status\" \"$(fc -ln -1)\" >/dev/null 2>&1; }\nprecmd_functions+=(_relay_capture)\n",
+            "function _relay_capture() { local status=$?; fc -ln -1 | relay record-check-stdin \"$status\" >/dev/null 2>&1; }\nprecmd_functions+=(_relay_capture)\n",
         ),
         "bash" => Ok(
-            "_relay_capture() { local status=$?; relay record-check \"$status\" \"$(history 1)\" >/dev/null 2>&1; }\nPROMPT_COMMAND='_relay_capture'${PROMPT_COMMAND:+\"; $PROMPT_COMMAND\"}\n",
+            "_relay_capture() { local status=$?; history 1 | relay record-check-stdin \"$status\" >/dev/null 2>&1; }\nPROMPT_COMMAND='_relay_capture'${PROMPT_COMMAND:+\"; $PROMPT_COMMAND\"}\n",
         ),
         "fish" => Ok(
-            "function _relay_capture --on-event fish_postexec\n  relay record-check $status \"$argv\" >/dev/null 2>&1\nend\n",
+            "function _relay_capture --on-event fish_postexec\n  string join ' ' $argv | relay record-check-stdin $status >/dev/null 2>&1\nend\n",
         ),
         _ => Err("usage: relay shell <zsh|bash|fish>".into()),
     }
@@ -758,6 +758,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let command = a.collect::<Vec<_>>().join(" ");
             if command.is_empty() {
                 return Err("usage: relay record-check <exit-code> <command>".into());
+            }
+            print!("{}", record_check(&root, &c, code, &command)?);
+        }
+        "record-check-stdin" => {
+            let code = a
+                .next()
+                .ok_or("usage: relay record-check-stdin <exit-code>")?
+                .parse::<i32>()?;
+            let mut command = String::new();
+            std::io::stdin().read_to_string(&mut command)?;
+            if command.trim().is_empty() {
+                return Err("usage: relay record-check-stdin <exit-code>".into());
             }
             print!("{}", record_check(&root, &c, code, &command)?);
         }

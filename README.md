@@ -38,9 +38,10 @@ the normal automatic-capture path.
 
 For terminal checks, run `relay shell zsh`, `relay shell bash`, or `relay shell
 fish` once and add its emitted hook to the matching shell configuration. The
-hook calls `relay record-check` after commands, which hashes the command before
-it reaches SQLite. It is opt-in because shell history itself can be sensitive;
-Relay does not modify shell profiles automatically.
+hook pipes command text to `relay record-check-stdin` after commands, avoiding
+raw command text in Relay's process arguments and hashing it before it reaches
+SQLite. It is opt-in because shell history itself can be sensitive; Relay does
+not modify shell profiles automatically.
 
 `relay compact` appends a privacy-safe aggregate epoch. `relay explain` shows
 only that epoch's event/check counts and summary hash; it never reconstructs
