@@ -3,8 +3,8 @@
   "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
   "aggregateObjective": "Implement Relay v0.1 according to the approved plan and this durable ledger.",
   "goals": [
-    {"id":"G001","title":"Bootstrap repository and evidence schema","status":"in_progress"},
-    {"id":"G002","title":"Implement snapshot, assertions, and deterministic card","status":"pending"},
+    {"id":"G001","title":"Bootstrap repository and evidence schema","status":"complete"},
+    {"id":"G002","title":"Implement snapshot, assertions, and deterministic card","status":"in_progress"},
     {"id":"G003","title":"Verify, harden, package, and review","status":"pending"}
   ]
 }
