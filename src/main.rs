@@ -525,6 +525,7 @@ fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if daemon_active(root) {
         return Ok(());
     }
+    let c = db(root)?;
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
     let _ = fs::remove_file(stop_path(root));
@@ -538,7 +539,6 @@ fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .open(pid_path(root))?;
     write!(pid_file, "{}\n{}", std::process::id(), nonce)?;
     pid_file.sync_all()?;
-    let c = db(root)?;
     run_daemon(root, &c, &nonce)
 }
 fn integration_command(

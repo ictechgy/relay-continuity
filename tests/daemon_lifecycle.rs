@@ -378,6 +378,28 @@ fn service_runner_never_duplicates_an_active_daemon() {
 }
 
 #[test]
+fn service_runner_bootstraps_a_fresh_git_checkout() {
+    let root = git_fixture("service-bootstrap-test");
+    assert!(!root.join(".relay").exists());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(["integration", "service", "run"])
+        .current_dir(&root)
+        .spawn()
+        .expect("start fresh service runner");
+    let ready = root.join(".relay/daemon.ready");
+    for _ in 0..100 {
+        if ready.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(ready.exists());
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    assert!(child.wait().expect("wait service runner").success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let root = std::env::temp_dir().join(format!(
         "relay-daemon-test-{}",
