@@ -99,7 +99,13 @@ fn dirty(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
 }
 fn snapshot(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     Ok(hash(
-        format!("{}\n{}", git(root, &["rev-parse", "HEAD"])?, dirty(root)?).as_bytes(),
+        format!(
+            "{}\n{}\n{}",
+            git(root, &["rev-parse", "HEAD"])?,
+            git(root, &["branch", "--show-current"])?,
+            dirty(root)?
+        )
+        .as_bytes(),
     ))
 }
 fn safe_command(command: &str) -> String {
@@ -111,6 +117,13 @@ fn safe_path(path: &str) -> String {
         || lower.contains("token")
         || lower.contains("secret")
         || lower.contains("key")
+        || lower.contains("password")
+        || lower.contains("credential")
+        || lower.contains("private")
+        || lower.contains("ghp_")
+        || lower.contains("github_pat_")
+        || lower.contains("sk-")
+        || lower.starts_with("eyj")
     {
         "[redacted-path]".into()
     } else {
@@ -521,6 +534,9 @@ mod tests {
     #[test]
     fn secret_metadata_is_hidden() {
         assert_eq!(safe_path(".env.token"), "[redacted-path]");
+        assert_eq!(safe_path("feature/ghp_example"), "[redacted-path]");
+        assert_eq!(safe_path("password-notes.md"), "[redacted-path]");
+        assert_eq!(safe_path("eyJheader.payload.signature"), "[redacted-path]");
         assert!(!safe_command("curl --token abc").contains("abc"));
     }
     #[test]
