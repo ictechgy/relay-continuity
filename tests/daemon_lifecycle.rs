@@ -110,5 +110,12 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
         String::from_utf8_lossy(&run(&root, &["daemon", "status"]).stdout)
             .contains("Capture: unavailable")
     );
+    fs::write(root.join(".relay/daemon.pid"), "999999999").expect("stale pid");
+    assert!(run(&root, &["daemon", "start"]).status.success());
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["daemon", "status"]).stdout)
+            .contains("Capture: active")
+    );
+    assert!(run(&root, &["daemon", "stop"]).status.success());
     fs::remove_dir_all(root).expect("remove fixture");
 }
