@@ -18,3 +18,7 @@ raw command output.
 ## Development
 
 `cargo test` runs the local test suite. The project is local-only by design.
+
+`relay init` creates local ignored state. `relay watch 60` polls Git snapshots,
+`relay check <command>` records only a safe command identity and exit code, and
+`relay note <text>` writes an explicitly unverified annotation.
