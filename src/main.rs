@@ -42,6 +42,70 @@ fn integration_owned_path(root: &Path, provider: &str) -> PathBuf {
 fn codex_hook_path(root: &Path) -> PathBuf {
     root.join(".codex/hooks.json")
 }
+fn ensure_managed_directory(
+    root: &Path,
+    components: &[&str],
+    create_missing: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let canonical_root = fs::canonicalize(root)?;
+    let mut current = canonical_root.clone();
+    for component in components {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(format!(
+                    "Relay refuses a symlinked or non-directory managed path: {}",
+                    current.display()
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create_missing => {
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let metadata = fs::symlink_metadata(&current)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(format!(
+                        "Relay refuses a symlinked or non-directory managed path: {}",
+                        current.display()
+                    )
+                    .into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        if !fs::canonicalize(&current)?.starts_with(&canonical_root) {
+            return Err(format!(
+                "Relay refuses a managed path outside the Git root: {}",
+                current.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+fn ensure_relay_directory(
+    root: &Path,
+    create_missing: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_managed_directory(root, &[".relay"], create_missing)
+}
+fn ensure_integration_directory(
+    root: &Path,
+    create_missing: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_managed_directory(root, &[".relay", "integrations"], create_missing)
+}
+fn ensure_codex_directory(
+    root: &Path,
+    create_missing: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_managed_directory(root, &[".codex"], create_missing)
+}
 fn integration_provider_is_valid(provider: &str) -> bool {
     matches!(provider, "codex" | "claude" | "grok")
 }
@@ -145,12 +209,13 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::E
     }
     result
 }
-fn write_integration_manifest(
+fn integration_manifest_bytes(
     root: &Path,
     provider: &str,
     state: &str,
     config_bytes: &[u8],
-) -> Result<(), Box<dyn std::error::Error>> {
+    hook_bytes: Option<&[u8]>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     if !integration_provider_is_valid(provider)
         || !matches!(
             state,
@@ -159,16 +224,25 @@ fn write_integration_manifest(
     {
         return Err("Relay rejected malformed integration state".into());
     }
-    fs::create_dir_all(integration_dir(root))?;
     let root_hash = hash(root.to_string_lossy().as_bytes());
-    let manifest = format!(
+    let mut manifest = format!(
         "version=1\nprovider={provider}\nstate={state}\nroot_hash={root_hash}\nconfig_hash={}\n",
         hash(config_bytes)
     );
-    atomic_replace(
-        &integration_manifest_path(root, provider),
-        manifest.as_bytes(),
-    )
+    if let Some(hook_bytes) = hook_bytes {
+        manifest.push_str(&format!("hook_hash={}\n", hash(hook_bytes)));
+    }
+    Ok(manifest.into_bytes())
+}
+fn write_integration_manifest(
+    root: &Path,
+    provider: &str,
+    state: &str,
+    config_bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_integration_directory(root, true)?;
+    let manifest = integration_manifest_bytes(root, provider, state, config_bytes, None)?;
+    atomic_replace(&integration_manifest_path(root, provider), &manifest)
 }
 fn write_codex_manifest(
     root: &Path,
@@ -176,16 +250,17 @@ fn write_codex_manifest(
     owned_bytes: &[u8],
     hook_bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    write_integration_manifest(root, "codex", state, owned_bytes)?;
-    let path = integration_manifest_path(root, "codex");
-    let mut manifest = fs::read_to_string(&path)?;
-    manifest.push_str(&format!("hook_hash={}\n", hash(hook_bytes)));
-    atomic_replace(&path, manifest.as_bytes())
+    ensure_integration_directory(root, true)?;
+    let manifest = integration_manifest_bytes(root, "codex", state, owned_bytes, Some(hook_bytes))?;
+    atomic_replace(&integration_manifest_path(root, "codex"), &manifest)
 }
 fn codex_hook_matches_manifest(
     root: &Path,
     values: &std::collections::BTreeMap<String, String>,
 ) -> bool {
+    if ensure_codex_directory(root, false).is_err() {
+        return false;
+    }
     let Some(expected) = values.get("hook_hash") else {
         return false;
     };
@@ -197,6 +272,7 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
     if !integration_provider_is_valid(provider) {
         return Err("Relay rejected an unsupported integration provider".into());
     }
+    ensure_integration_directory(root, false)?;
     let path = integration_manifest_path(root, provider);
     if !path.exists() {
         return Ok("disabled".into());
@@ -257,6 +333,7 @@ fn integration_manifest_values(
     root: &Path,
     provider: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    ensure_integration_directory(root, false)?;
     let text = fs::read_to_string(integration_manifest_path(root, provider))?;
     Ok(text
         .lines()
@@ -342,6 +419,7 @@ fn codex_owned_state(state: &str, hook_bytes: &[u8]) -> Vec<u8> {
     .into_bytes()
 }
 fn codex_hook_preflight(root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    ensure_codex_directory(root, false)?;
     let desired = codex_hook_config(root)?;
     let path = codex_hook_path(root);
     match fs::read(&path) {
@@ -351,6 +429,31 @@ fn codex_hook_preflight(root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Erro
         Ok(_) => Err(
             "Relay refuses to overwrite an existing Codex hooks.json; no file was changed".into(),
         ),
+    }
+}
+fn codex_manifest_matches_or_is_missing(
+    root: &Path,
+    state: &str,
+    owned: &[u8],
+    hook: &[u8],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let expected = integration_manifest_bytes(root, "codex", state, owned, Some(hook))?;
+    match fs::read(integration_manifest_path(root, "codex")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error.into()),
+        // A prefix can only be Relay's interrupted manifest write, never an
+        // arbitrary replacement. The owned file and hook must still be exact.
+        Ok(current) => Ok(expected.starts_with(&current)),
+    }
+}
+fn codex_owned_state_name(root: &Path, hook: &[u8]) -> Option<&'static str> {
+    let owned = fs::read(integration_owned_path(root, "codex")).ok()?;
+    if owned == codex_owned_state("awaiting_trust", hook) {
+        Some("awaiting_trust")
+    } else if owned == codex_owned_state("ready", hook) {
+        Some("ready")
+    } else {
+        None
     }
 }
 fn codex_owned_provenance(root: &Path, hook: &[u8]) -> bool {
@@ -373,10 +476,25 @@ fn codex_owned_provenance(root: &Path, hook: &[u8]) -> bool {
 fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_config(root)?;
     let hook_path = codex_hook_path(root);
+    ensure_codex_directory(root, true)?;
+    ensure_integration_directory(root, true)?;
     match fs::read(&hook_path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
         Ok(current) if current == hook && codex_owned_provenance(root, &hook) => return Ok(()),
+        Ok(current)
+            if current == hook
+                && codex_owned_state_name(root, &hook) == Some("awaiting_trust")
+                && codex_manifest_matches_or_is_missing(
+                    root,
+                    "awaiting_trust",
+                    &codex_owned_state("awaiting_trust", &hook),
+                    &hook,
+                )? =>
+        {
+            let owned = codex_owned_state("awaiting_trust", &hook);
+            return write_codex_manifest(root, "awaiting_trust", &owned, &hook);
+        }
         Ok(_) => {
             return Err(
                 "Relay refuses to adopt or overwrite an existing Codex hooks.json; no file was changed"
@@ -384,8 +502,6 @@ fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             );
         }
     }
-    fs::create_dir_all(hook_path.parent().ok_or("Codex hook path has no parent")?)?;
-    fs::create_dir_all(integration_dir(root))?;
     atomic_replace(&hook_path, &hook)?;
     let owned = codex_owned_state("awaiting_trust", &hook);
     atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
@@ -393,18 +509,45 @@ fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_preflight(root)?;
-    let values = integration_manifest_values(root, "codex")?;
-    if integration_state(root, "codex")? != "awaiting_trust"
-        || !codex_hook_matches_manifest(root, &values)
-        || !codex_owned_provenance(root, &hook)
-    {
-        return Err(
-            "Relay Codex integration is not an unchanged awaiting-trust installation".into(),
-        );
+    ensure_integration_directory(root, false)?;
+    let awaiting = codex_owned_state("awaiting_trust", &hook);
+    let ready = codex_owned_state("ready", &hook);
+    match codex_owned_state_name(root, &hook) {
+        Some("ready")
+            if codex_manifest_matches_or_is_missing(root, "awaiting_trust", &awaiting, &hook)?
+                || codex_manifest_matches_or_is_missing(root, "ready", &ready, &hook)? =>
+        {
+            // The owned state was committed before a crash. Complete the
+            // corresponding manifest rather than strand an exact Relay hook.
+            write_codex_manifest(root, "ready", &ready, &hook)
+        }
+        Some("awaiting_trust") => {
+            let values = integration_manifest_values(root, "codex")?;
+            let manifest_is_ready =
+                integration_manifest_bytes(root, "codex", "ready", &ready, Some(&hook)).is_ok_and(
+                    |expected| {
+                        fs::read(integration_manifest_path(root, "codex")).ok() == Some(expected)
+                    },
+                );
+            if manifest_is_ready {
+                return atomic_replace(&integration_owned_path(root, "codex"), &ready);
+            }
+            if integration_state(root, "codex")? != "awaiting_trust"
+                || !codex_hook_matches_manifest(root, &values)
+                || !codex_owned_provenance(root, &hook)
+            {
+                return Err(
+                    "Relay Codex integration is not an unchanged awaiting-trust installation"
+                        .into(),
+                );
+            }
+            // Publish the complete manifest first. A retry can safely finish
+            // the owned-state write if the process stops between these writes.
+            write_codex_manifest(root, "ready", &ready, &hook)?;
+            atomic_replace(&integration_owned_path(root, "codex"), &ready)
+        }
+        _ => Err("Relay Codex integration is not an unchanged awaiting-trust installation".into()),
     }
-    let owned = codex_owned_state("ready", &hook);
-    atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
-    write_codex_manifest(root, "ready", &owned, &hook)
 }
 fn codex_uninstall(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_preflight(root)?;
@@ -653,7 +796,7 @@ fn integration_command(
             if provider == "codex" {
                 return Err("use `relay integration codex install --apply` for the Codex trust gate".into());
             }
-            fs::create_dir_all(integration_dir(root))?;
+            ensure_integration_directory(root, true)?;
             let owned = format!(
                 "version=1\nprovider={provider}\nstate=unavailable\nreason=capability-probe-required\n"
             );
@@ -740,6 +883,7 @@ impl Drop for WriterLock {
     }
 }
 fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
+    ensure_relay_directory(root, true)?;
     let path = writer_lock_path(root);
     for attempt in 0..=10 {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -800,7 +944,10 @@ fn create_schema(c: &Connection) -> rusqlite::Result<()> {
       CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);
       CREATE TABLE IF NOT EXISTS epochs(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, event_count INTEGER NOT NULL, check_count INTEGER NOT NULL, summary_hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS annotations(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-      CREATE TABLE IF NOT EXISTS adapter_metadata(id INTEGER PRIMARY KEY, provider TEXT NOT NULL, snapshot TEXT NOT NULL, metadata_hash TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+      CREATE TABLE IF NOT EXISTS adapter_metadata(id INTEGER PRIMARY KEY, provider TEXT NOT NULL, snapshot TEXT NOT NULL, metadata_hash TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      CREATE INDEX IF NOT EXISTS checks_snapshot_id ON checks(snapshot, id DESC);
+      CREATE INDEX IF NOT EXISTS assertions_snapshot_id ON assertions(snapshot, id DESC);
+      CREATE INDEX IF NOT EXISTS annotations_snapshot_id ON annotations(snapshot, id DESC);",
     )
 }
 fn corrupt_database(error: &rusqlite::Error) -> bool {
@@ -844,8 +991,8 @@ fn recovered_db(
     Ok(c)
 }
 fn db(root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
+    ensure_relay_directory(root, true)?;
     let dir = relay_dir(root);
-    fs::create_dir_all(&dir)?;
     let path = dir.join("evidence.sqlite");
     if fs::read(&path)
         .ok()
@@ -1114,7 +1261,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = fs::write(stop_path(root), &nonce);
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
-    return Err("Relay daemon did not become ready".into());
+    Err("Relay daemon did not become ready".into())
 }
 fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if read_pid(root).is_none() {
@@ -1152,11 +1299,12 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(root, RecursiveMode::Recursive)?;
     fs::write(ready_path(root), nonce)?;
-    if let Err(error) = observe(root, c) {
-        if !writer_busy(error.as_ref()) {
-            return Err(error);
-        }
+    if let Err(error) = observe(root, c)
+        && !writer_busy(error.as_ref())
+    {
+        return Err(error);
     }
+    let mut last_reconcile = Instant::now();
     let mut pending: Option<Instant> = None;
     loop {
         if fs::read_to_string(stop_path(root)).ok().as_deref() == Some(nonce) {
@@ -1166,22 +1314,29 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
         }
         let timeout = pending
             .map(|changed| Duration::from_millis(750).saturating_sub(changed.elapsed()))
-            .unwrap_or(Duration::from_millis(500));
+            // Keep stop acknowledgement responsive without polling Git.
+            .unwrap_or(Duration::from_millis(100));
         match rx.recv_timeout(timeout) {
             Ok(Ok(event)) if event_is_relevant(root, &event) => pending = Some(Instant::now()),
             Ok(Ok(_)) | Ok(Err(_)) => {}
             Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
-                if let Err(error) = observe(root, c) {
-                    if !writer_busy(error.as_ref()) {
-                        return Err(error);
-                    }
+                if let Err(error) = observe(root, c)
+                    && !writer_busy(error.as_ref())
+                {
+                    return Err(error);
                 }
+                last_reconcile = Instant::now();
             }
             Err(RecvTimeoutError::Timeout) => {
-                if let Err(error) = observe(root, c) {
-                    if !writer_busy(error.as_ref()) {
+                // Filesystem events are the fast path. Reconcile only once
+                // every five seconds when a platform coalesces or drops one.
+                if last_reconcile.elapsed() >= Duration::from_secs(5) {
+                    if let Err(error) = observe(root, c)
+                        && !writer_busy(error.as_ref())
+                    {
                         return Err(error);
                     }
+                    last_reconcile = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -1301,19 +1456,19 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
         )
         .optional()?;
     let broken = latest_check.is_some_and(|exit_code| exit_code != 0);
-    let prior: i64 = c.query_row(
-        "SELECT COUNT(*) FROM assertions WHERE snapshot != ?1",
+    let prior: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assertions WHERE snapshot != ?1)",
         params![now],
-        |r| r.get(0),
+        |r| r.get::<_, i64>(0).map(|value| value != 0),
     )?;
-    let current_assertions: i64 = c.query_row(
-        "SELECT COUNT(*) FROM assertions WHERE snapshot = ?1",
+    let current_assertions: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assertions WHERE snapshot = ?1)",
         params![now],
-        |r| r.get(0),
+        |r| r.get::<_, i64>(0).map(|value| value != 0),
     )?;
     if broken {
         state = "BROKEN";
-    } else if state == "FRESH" && prior > 0 && current_assertions == 0 {
+    } else if state == "FRESH" && prior && !current_assertions {
         state = "STALE";
     }
     let note: String = c
@@ -1434,7 +1589,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("created privacy-safe epoch for {events} events and {checks} checks");
         }
-        "explain" => print!("{}\n", explain_epochs(&c)?),
+        "explain" => println!("{}", explain_epochs(&c)?),
         "note" => {
             let _lock = writer_lock(&root)?;
             let text = a.collect::<Vec<_>>().join(" ");

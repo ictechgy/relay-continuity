@@ -1,4 +1,6 @@
 use rusqlite::Connection;
+#[cfg(unix)]
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::Write,
@@ -7,6 +9,11 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(unix)]
+fn sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
@@ -309,6 +316,89 @@ fn codex_hook_is_main_session_only_and_refuses_foreign_or_drifted_config() {
         "{\"changed\":true}\n"
     );
     assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn relay_rejects_symlinked_repository_managed_directories() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("managed-directory-symlink-test");
+    let outside = std::env::temp_dir().join(format!(
+        "relay-managed-directory-outside-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&outside).expect("create outside directory");
+    symlink(&outside, root.join(".codex")).expect("symlink Codex directory");
+    let codex = run(&root, &["integration", "codex", "install", "--apply"]);
+    assert!(!codex.status.success());
+    assert!(!outside.join("hooks.json").exists());
+
+    fs::remove_file(root.join(".codex")).expect("remove Codex symlink");
+    symlink(&outside, root.join(".relay")).expect("symlink Relay directory");
+    let init = run(&root, &["init"]);
+    assert!(!init.status.success());
+    assert!(!outside.join("evidence.sqlite").exists());
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(outside).expect("remove outside directory");
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_install_and_trust_recover_exact_interrupted_owned_state() {
+    let root = git_fixture("codex-interrupted-state-test");
+    assert!(
+        run(&root, &["integration", "codex", "install", "--apply"])
+            .status
+            .success()
+    );
+    let hook = fs::read(root.join(".codex/hooks.json")).expect("read hook");
+    let owned_path = root.join(".relay/integrations/codex.owned");
+    let manifest_path = root.join(".relay/integrations/codex.state");
+
+    fs::remove_file(&manifest_path).expect("remove interrupted install manifest");
+    assert!(
+        run(&root, &["integration", "codex", "install", "--apply"])
+            .status
+            .success()
+    );
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
+            .contains("codex: awaiting_trust")
+    );
+
+    let ready_owned = format!(
+        "version=1\nprovider=codex\nstate=ready\nhook_hash={}\n",
+        sha256(&hook)
+    );
+    fs::write(&owned_path, &ready_owned).expect("simulate interrupted trust owned state");
+    assert!(
+        run(&root, &["integration", "codex", "trust", "--apply"])
+            .status
+            .success()
+    );
+    let ready_manifest = fs::read(&manifest_path).expect("read recovered ready manifest");
+
+    let awaiting_owned = format!(
+        "version=1\nprovider=codex\nstate=awaiting_trust\nhook_hash={}\n",
+        sha256(&hook)
+    );
+    fs::write(&owned_path, awaiting_owned).expect("simulate manifest-first interruption");
+    fs::write(&manifest_path, ready_manifest).expect("retain completed ready manifest");
+    assert!(
+        run(&root, &["integration", "codex", "trust", "--apply"])
+            .status
+            .success()
+    );
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
+            .contains("codex: ready")
+    );
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
