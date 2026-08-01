@@ -1,5 +1,5 @@
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use rusqlite::{Connection, ErrorCode, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::{
     env,
@@ -298,6 +298,7 @@ fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Erro
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .optional()?
         .unwrap_or_default();
     if last.0 != s {
         c.execute(
@@ -569,6 +570,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
             [],
             |r| r.get(0),
         )
+        .optional()?
         .unwrap_or_default();
     let mut state = if last.is_empty() {
         "UNKNOWN"
@@ -606,7 +608,8 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
             params![now],
             |r| r.get(0),
         )
-        .unwrap_or_else(|_| "unknown".into());
+        .optional()?
+        .unwrap_or_else(|| "unknown".into());
     let changed = dirty_entries(root)?
         .into_iter()
         .map(|entry| entry.path)
