@@ -264,11 +264,19 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} integration drifted");
         return Ok(());
     }
-    if !daemon_active(root) {
-        start_daemon(root)?;
+    if !daemon_active(root) && start_daemon(root).is_err() {
+        println!("Relay unavailable: {provider} local evidence unavailable");
+        return Ok(());
     }
-    let c = db(root)?;
-    print!("{}", bounded_context(&card(root, &c)?, 320));
+    let Ok(c) = db(root) else {
+        println!("Relay unavailable: {provider} local evidence unavailable");
+        return Ok(());
+    };
+    let Ok(context) = card(root, &c) else {
+        println!("Relay unavailable: {provider} local evidence unavailable");
+        return Ok(());
+    };
+    print!("{}", bounded_context(&context, 320));
     Ok(())
 }
 fn json_escape(value: &str) -> String {
@@ -1264,10 +1272,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
     if text.split_whitespace().count() > 800 {
         return Err(rusqlite::Error::InvalidQuery.into());
     }
-    let destination = relay_dir(root).join("current.md");
-    let temporary = relay_dir(root).join("current.md.tmp");
-    fs::write(&temporary, &text).expect("write temporary card");
-    fs::rename(temporary, destination).expect("atomically replace card");
+    atomic_replace(&relay_dir(root).join("current.md"), text.as_bytes())?;
     Ok(text)
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
