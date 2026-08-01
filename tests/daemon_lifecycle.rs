@@ -34,6 +34,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .success()
     );
     fs::write(root.join("tracked.txt"), "initial").expect("fixture file");
+    fs::write(root.join(".relayignore"), "generated/\n").expect("ignore fixture");
     assert!(
         Command::new("git")
             .args(["add", "."])
@@ -69,6 +70,15 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let status = run(&root, &["daemon", "status"]);
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("Capture: active"));
+
+    fs::create_dir_all(root.join("generated")).expect("generated fixture");
+    for n in 0..1000 {
+        fs::write(root.join(format!("generated/{n}.tmp")), "ignored").expect("generated write");
+    }
+    thread::sleep(Duration::from_millis(1000));
+    let ignored_card = run(&root, &["resume"]);
+    assert!(ignored_card.status.success());
+    assert!(String::from_utf8_lossy(&ignored_card.stdout).contains("STATUS: FRESH"));
 
     fs::write(root.join("tracked.txt"), "first").expect("first burst write");
     fs::write(root.join("tracked.txt"), "second").expect("second burst write");
