@@ -14,6 +14,16 @@ fn hash(bytes: &[u8]) -> String {
 fn relay_dir(root: &Path) -> PathBuf {
     root.join(".relay")
 }
+fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let ok = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()?;
+    if !ok.status.success() || String::from_utf8_lossy(&ok.stdout).trim() != "true" {
+        return Err("Relay requires a Git worktree; no evidence was written".into());
+    }
+    Ok(())
+}
 fn db(root: &Path) -> rusqlite::Result<Connection> {
     let dir = relay_dir(root);
     fs::create_dir_all(&dir).expect("create .relay");
@@ -150,6 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut a = env::args().skip(1);
     let cmd = a.next().unwrap_or_else(|| "help".into());
     let root = env::current_dir()?;
+    ensure_git(&root)?;
     let c = db(&root)?;
     match cmd.as_str() {
         "init" => {
@@ -162,6 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 relay_dir(&root).join(".gitignore"),
                 "evidence.sqlite*\ncurrent.md\n",
             )?;
+            let exclude = root.join(".git/info/exclude");
+            let existing = fs::read_to_string(&exclude).unwrap_or_default();
+            if !existing.lines().any(|line| line == ".relay/") {
+                fs::write(exclude, format!("{existing}\n.relay/\n"))?;
+            }
             println!("initialized {}", relay_dir(&root).display());
         }
         "observe" => {
