@@ -60,7 +60,12 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     );
 
     assert!(run(&root, &["init"]).status.success());
-    assert!(run(&root, &["daemon", "start"]).status.success());
+    let started = run(&root, &["daemon", "start"]);
+    assert!(
+        started.status.success(),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
     let status = run(&root, &["daemon", "status"]);
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("Capture: active"));

@@ -1,4 +1,4 @@
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, ErrorCode, params};
 use sha2::{Digest, Sha256};
 use std::{
@@ -72,29 +72,35 @@ fn db(root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
             create_schema(&c)?;
             c.execute(
                 "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
-                params![snapshot(root)],
+                params![snapshot(root)?],
             )?;
             Ok(c)
         }
         Err(error) => Err(error.into()),
     }
 }
-fn git(root: &Path, args: &[&str]) -> String {
-    Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default()
-        .trim()
-        .to_owned()
+fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git").args(args).current_dir(root).output()?;
+    if !output.status.success() {
+        return Err("Git state is unavailable; no Relay evidence was written".into());
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
-fn dirty(root: &Path) -> String {
-    git(root, &["status", "--porcelain"])
+fn dirty(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(git(root, &["status", "--porcelain"])?
+        .lines()
+        .filter(|line| {
+            line.split_whitespace()
+                .last()
+                .is_none_or(|path| !ignored(root, path))
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
-fn snapshot(root: &Path) -> String {
-    hash(format!("{}\n{}", git(root, &["rev-parse", "HEAD"]), dirty(root)).as_bytes())
+fn snapshot(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(hash(
+        format!("{}\n{}", git(root, &["rev-parse", "HEAD"])?, dirty(root)?).as_bytes(),
+    ))
 }
 fn safe_command(command: &str) -> String {
     format!("command#{}", &hash(command.as_bytes())[..12])
@@ -112,7 +118,7 @@ fn safe_path(path: &str) -> String {
     }
 }
 fn ignored(root: &Path, path: &str) -> bool {
-    let defaults = [".env", ".pem", "id_rsa", "target/"];
+    let defaults = [".env", ".pem", "id_rsa", "target/", ".relay/", ".git/"];
     if defaults.iter().any(|p| path.contains(p)) {
         return true;
     }
@@ -123,8 +129,8 @@ fn ignored(root: &Path, path: &str) -> bool {
         .filter(|p| !p.is_empty() && !p.starts_with('#'))
         .any(|p| path.contains(p))
 }
-fn observe(root: &Path, c: &Connection) -> rusqlite::Result<bool> {
-    let s = snapshot(root);
+fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Error>> {
+    let s = snapshot(root)?;
     let last: String = c
         .query_row(
             "SELECT snapshot FROM events ORDER BY id DESC LIMIT 1",
@@ -135,14 +141,26 @@ fn observe(root: &Path, c: &Connection) -> rusqlite::Result<bool> {
     if last != s {
         c.execute(
             "INSERT INTO events(kind,snapshot,detail) VALUES('dirty-set',?1,?2)",
-            params![s, hash(dirty(root).as_bytes())],
+            params![s, hash(dirty(root)?.as_bytes())],
         )?;
         return Ok(true);
     }
     Ok(false)
 }
 fn read_pid(root: &Path) -> Option<u32> {
-    fs::read_to_string(pid_path(root)).ok()?.trim().parse().ok()
+    fs::read_to_string(pid_path(root))
+        .ok()?
+        .lines()
+        .next()?
+        .parse()
+        .ok()
+}
+fn read_nonce(root: &Path) -> Option<String> {
+    fs::read_to_string(pid_path(root))
+        .ok()?
+        .lines()
+        .nth(1)
+        .map(str::to_owned)
 }
 fn process_active(pid: u32) -> bool {
     Command::new("kill")
@@ -152,7 +170,11 @@ fn process_active(pid: u32) -> bool {
         .unwrap_or(false)
 }
 fn daemon_active(root: &Path) -> bool {
-    read_pid(root).is_some_and(process_active)
+    let (Some(pid), Some(nonce)) = (read_pid(root), read_nonce(root)) else {
+        return false;
+    };
+    process_active(pid)
+        && fs::read_to_string(ready_path(root)).ok().as_deref() == Some(nonce.as_str())
 }
 fn daemon_state(root: &Path) -> &'static str {
     if daemon_active(root) {
@@ -167,12 +189,22 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
+    let nonce = hash(
+        format!(
+            "{}:{:?}",
+            root.display(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?
+        )
+        .as_bytes(),
+    )[..16]
+        .to_owned();
     let mut pid_file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(pid_path(root))?;
     let child = match Command::new(env::current_exe()?)
         .args(["daemon", "run"])
+        .arg(&nonce)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -185,10 +217,10 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             return Err(error.into());
         }
     };
-    write!(pid_file, "{}", child.id())?;
+    write!(pid_file, "{}\n{}", child.id(), nonce)?;
     pid_file.sync_all()?;
     for _ in 0..150 {
-        if ready_path(root).exists() && process_active(child.id()) {
+        if daemon_active(root) {
             println!("Relay daemon started (pid {})", child.id());
             return Ok(());
         }
@@ -205,45 +237,63 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let Some(pid) = read_pid(root) else {
         return Err("Relay daemon is not running".into());
     };
-    if process_active(pid) {
-        let status = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()?;
-        if !status.success() {
-            return Err("Relay daemon could not be stopped".into());
-        }
+    if !daemon_active(root) {
+        let _ = fs::remove_file(pid_path(root));
+        let _ = fs::remove_file(ready_path(root));
+        return Err("Relay daemon state was stale; no process was stopped".into());
+    }
+    let status = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()?;
+    if !status.success() {
+        return Err("Relay daemon could not be stopped".into());
     }
     fs::remove_file(pid_path(root))?;
     let _ = fs::remove_file(ready_path(root));
     println!("Relay daemon stopped");
     Ok(())
 }
-fn run_daemon(root: &Path, c: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+fn event_is_relevant(root: &Path, event: &Event) -> bool {
+    event.paths.iter().any(|path| {
+        path.strip_prefix(root).ok().is_none_or(|relative| {
+            let relative = relative.to_string_lossy();
+            !ignored(root, &relative)
+        })
+    })
+}
+fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = channel();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(root, RecursiveMode::Recursive)?;
-    fs::write(ready_path(root), "ready")?;
+    fs::write(ready_path(root), nonce)?;
     observe(root, c)?;
     let mut pending: Option<Instant> = None;
     loop {
         let timeout = pending
             .map(|changed| Duration::from_millis(750).saturating_sub(changed.elapsed()))
-            .unwrap_or(Duration::from_secs(60));
+            .unwrap_or(Duration::from_millis(500));
         match rx.recv_timeout(timeout) {
-            Ok(Ok(_)) => pending = Some(Instant::now()),
-            Ok(Err(_)) => pending = Some(Instant::now()),
+            Ok(Ok(event)) if event_is_relevant(root, &event) => pending = Some(Instant::now()),
+            Ok(Ok(_)) | Ok(Err(_)) => {}
             Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
                 observe(root, c)?;
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                observe(root, c)?;
+            }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err("filesystem watcher disconnected".into());
             }
         }
     }
 }
-fn record_check(root: &Path, c: &Connection, code: i32, command: &str) -> rusqlite::Result<String> {
-    let s = snapshot(root);
+fn record_check(
+    root: &Path,
+    c: &Connection,
+    code: i32,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let s = snapshot(root)?;
     let label = safe_command(command);
     c.execute(
         "INSERT INTO checks(snapshot,command,exit_code) VALUES(?1,?2,?3)",
@@ -274,8 +324,8 @@ fn shell_hook(shell: &str) -> Result<&'static str, Box<dyn std::error::Error>> {
         _ => Err("usage: relay shell <zsh|bash|fish>".into()),
     }
 }
-fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
-    let now = snapshot(root);
+fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error>> {
+    let now = snapshot(root)?;
     let last: String = c
         .query_row(
             "SELECT snapshot FROM events ORDER BY id DESC LIMIT 1",
@@ -317,7 +367,7 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
             |r| r.get(0),
         )
         .unwrap_or_else(|_| "unknown".into());
-    let changed = dirty(root)
+    let changed = dirty(root)?
         .lines()
         .filter_map(|l| l.split_whitespace().last())
         .filter(|p| !ignored(root, p))
@@ -328,7 +378,7 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
     let text = format!(
         "# Relay context\n\nSTATUS: {state}\nCapture: {}\nSnapshot: {now}\nBranch: {}\nChanged: {}\nChecks: {}\nSemantic context: unknown (no vendor adapter required)\nNote (unverified): {note}\n\n{}\n",
         daemon_state(root),
-        safe_path(&git(root, &["branch", "--show-current"])),
+        safe_path(&git(root, &["branch", "--show-current"])?),
         if changed.is_empty() { "none" } else { &changed },
         if broken > 0 {
             "BROKEN evidence exists"
@@ -342,7 +392,7 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
         }
     );
     if text.split_whitespace().count() > 800 {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Err(rusqlite::Error::InvalidQuery.into());
     }
     let destination = relay_dir(root).join("current.md");
     let temporary = relay_dir(root).join("current.md.tmp");
@@ -358,7 +408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c = db(&root)?;
     match cmd.as_str() {
         "init" => {
-            let s = snapshot(&root);
+            let s = snapshot(&root)?;
             c.execute(
                 "INSERT INTO events(kind,snapshot,detail) VALUES('init',?1,'local-only')",
                 params![s],
@@ -394,7 +444,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("start") => start_daemon(&root)?,
             Some("stop") => stop_daemon(&root)?,
             Some("status") => println!("Capture: {}", daemon_state(&root)),
-            Some("run") => run_daemon(&root, &c)?,
+            Some("run") => run_daemon(
+                &root,
+                &c,
+                &a.next().ok_or("Relay daemon requires a managed nonce")?,
+            )?,
             _ => return Err("usage: relay daemon <start|stop|status>".into()),
         },
         "shell" => print!("{}", shell_hook(a.next().as_deref().unwrap_or(""))?),
@@ -413,7 +467,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if text.is_empty() {
                 return Err("usage: relay note <text>".into());
             };
-            let s = snapshot(&root);
+            let s = snapshot(&root)?;
             c.execute(
                 "INSERT INTO annotations(snapshot,text) VALUES(?1,?2)",
                 params![s, format!("annotation#{}", &hash(text.as_bytes())[..12])],
@@ -574,6 +628,30 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(relay_dir(&root)).unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        fs::write(root.join("a.txt"), "one").unwrap();
+        Command::new("git")
+            .args(["add", "a.txt"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-c",
+                "user.email=a@b.c",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(&root)
+            .status()
+            .unwrap();
         fs::write(
             relay_dir(&root).join("evidence.sqlite"),
             "not a sqlite database",
