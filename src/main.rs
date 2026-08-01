@@ -96,56 +96,119 @@ fn corrupt_database(error: &rusqlite::Error) -> bool {
             if matches!(inner.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
     )
 }
+fn quarantine_database(dir: &Path, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let suffix = format!(
+        "corrupt-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    fs::rename(path, dir.join(format!("evidence.sqlite.{suffix}")))?;
+    for sidecar in ["-wal", "-shm"] {
+        let sidecar_path = dir.join(format!("evidence.sqlite{sidecar}"));
+        if sidecar_path.exists() {
+            fs::rename(
+                &sidecar_path,
+                dir.join(format!("evidence.sqlite.{suffix}{sidecar}")),
+            )?;
+        }
+    }
+    Ok(())
+}
+fn recovered_db(
+    root: &Path,
+    dir: &Path,
+    path: &Path,
+) -> Result<Connection, Box<dyn std::error::Error>> {
+    quarantine_database(dir, path)?;
+    let c = Connection::open(path)?;
+    create_schema(&c)?;
+    c.execute(
+        "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
+        params![snapshot(root)?],
+    )?;
+    Ok(c)
+}
 fn db(root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
     let dir = relay_dir(root);
     fs::create_dir_all(&dir)?;
     let path = dir.join("evidence.sqlite");
+    if fs::read(&path)
+        .ok()
+        .is_some_and(|bytes| !bytes.is_empty() && !bytes.starts_with(b"SQLite format 3\0"))
+    {
+        return recovered_db(root, &dir, &path);
+    }
     let c = Connection::open(&path)?;
     match create_schema(&c) {
         Ok(()) => Ok(c),
         Err(error) if corrupt_database(&error) => {
             drop(c);
-            let backup = dir.join(format!(
-                "evidence.sqlite.corrupt-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_secs()
-            ));
-            fs::rename(&path, backup)?;
-            let c = Connection::open(&path)?;
-            create_schema(&c)?;
-            c.execute(
-                "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
-                params![snapshot(root)?],
-            )?;
-            Ok(c)
+            recovered_db(root, &dir, &path)
         }
         Err(error) => Err(error.into()),
     }
 }
-fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let output = Command::new("git").args(args).current_dir(root).output()?;
     if !output.status.success() {
         return Err("Git state is unavailable; no Relay evidence was written".into());
     }
-    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    Ok(output.stdout)
+}
+fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(String::from_utf8(git_bytes(root, args)?)?.trim().to_owned())
+}
+struct DirtyEntry {
+    code: String,
+    path: String,
+    path_hash: String,
+}
+fn dirty_entries(root: &Path) -> Result<Vec<DirtyEntry>, Box<dyn std::error::Error>> {
+    let output = git_bytes(root, &["status", "--porcelain=v1", "-z"])?;
+    let fields = output.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let mut index = 0;
+    let mut entries = Vec::new();
+    while index < fields.len() {
+        let field = fields[index];
+        index += 1;
+        if field.is_empty() {
+            continue;
+        }
+        if field.len() < 4 || field[2] != b' ' {
+            return Err("Git status metadata is malformed; no Relay evidence was written".into());
+        }
+        let code = std::str::from_utf8(&field[..2])?.to_owned();
+        let raw_path = &field[3..];
+        // In porcelain -z rename/copy records carry the original path in the
+        // following field. Consume it but never persist either raw path.
+        if matches!(field[0], b'R' | b'C') && index < fields.len() {
+            index += 1;
+        }
+        let path = match std::str::from_utf8(raw_path) {
+            Ok(path) if !ignored(root, path) => safe_path(path),
+            Ok(_) => continue,
+            Err(_) => "[redacted-non-utf8-path]".to_owned(),
+        };
+        entries.push(DirtyEntry {
+            code,
+            path,
+            path_hash: hash(raw_path),
+        });
+    }
+    Ok(entries)
 }
 fn dirty(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(git(root, &["status", "--porcelain"])?
-        .lines()
-        .filter(|line| {
-            line.split_whitespace()
-                .last()
-                .is_none_or(|path| !ignored(root, path))
-        })
+    Ok(dirty_entries(root)?
+        .iter()
+        .map(|entry| format!("{} {}", entry.code, entry.path_hash))
         .collect::<Vec<_>>()
         .join("\n"))
 }
 fn dirty_paths(root: &Path) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
-    Ok(dirty(root)?
-        .lines()
-        .filter_map(|line| line.split_whitespace().last())
-        .map(|path| (safe_path(path), hash(path.as_bytes())))
+    Ok(dirty_entries(root)?
+        .into_iter()
+        .map(|entry| (entry.path, entry.path_hash))
         .collect())
 }
 struct RepositoryState {
@@ -514,11 +577,14 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
     } else {
         "STALE"
     };
-    let broken: i64 = c.query_row(
-        "SELECT COUNT(*) FROM checks WHERE exit_code != 0 AND snapshot = ?1",
-        params![now],
-        |r| r.get(0),
-    )?;
+    let latest_check: Option<i32> = c
+        .query_row(
+            "SELECT exit_code FROM checks WHERE snapshot = ?1 ORDER BY id DESC LIMIT 1",
+            params![now],
+            |r| r.get(0),
+        )
+        .ok();
+    let broken = latest_check.is_some_and(|exit_code| exit_code != 0);
     let prior: i64 = c.query_row(
         "SELECT COUNT(*) FROM assertions WHERE snapshot != ?1",
         params![now],
@@ -529,7 +595,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
         params![now],
         |r| r.get(0),
     )?;
-    if broken > 0 {
+    if broken {
         state = "BROKEN";
     } else if state == "FRESH" && prior > 0 && current_assertions == 0 {
         state = "STALE";
@@ -541,11 +607,9 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
             |r| r.get(0),
         )
         .unwrap_or_else(|_| "unknown".into());
-    let changed = dirty(root)?
-        .lines()
-        .filter_map(|l| l.split_whitespace().last())
-        .filter(|p| !ignored(root, p))
-        .map(safe_path)
+    let changed = dirty_entries(root)?
+        .into_iter()
+        .map(|entry| entry.path)
         .take(12)
         .collect::<Vec<_>>()
         .join(", ");
@@ -554,7 +618,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
         daemon_state(root),
         safe_path(&git(root, &["branch", "--show-current"])?),
         if changed.is_empty() { "none" } else { &changed },
-        if broken > 0 {
+        if broken {
             "BROKEN evidence exists"
         } else {
             "No broken recorded checks"
@@ -901,6 +965,8 @@ mod tests {
             "not a sqlite database",
         )
         .unwrap();
+        fs::write(relay_dir(&root).join("evidence.sqlite-wal"), "stale wal").unwrap();
+        fs::write(relay_dir(&root).join("evidence.sqlite-shm"), "stale shm").unwrap();
         let c = db(&root).unwrap();
         let recovered: i64 = c
             .query_row(
@@ -918,6 +984,30 @@ mod tests {
                     .file_name()
                     .to_string_lossy()
                     .starts_with("evidence.sqlite.corrupt-"))
+        );
+        assert!(
+            fs::read_dir(relay_dir(&root))
+                .unwrap()
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("evidence.sqlite.corrupt-")
+                        && entry.file_name().to_string_lossy().ends_with("-wal")
+                })
+        );
+        assert!(
+            fs::read_dir(relay_dir(&root))
+                .unwrap()
+                .flatten()
+                .any(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("evidence.sqlite.corrupt-")
+                        && entry.file_name().to_string_lossy().ends_with("-shm")
+                })
         );
         fs::remove_dir_all(root).unwrap();
     }
