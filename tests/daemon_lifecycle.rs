@@ -179,6 +179,20 @@ fn service_install_writes_only_an_explicit_user_template() {
 }
 
 #[test]
+fn service_runner_never_duplicates_an_active_daemon() {
+    let root = git_fixture("service-duplicate-test");
+    let started = run(&root, &["daemon", "start"]);
+    assert!(started.status.success());
+    let service = run(&root, &["integration", "service", "run"]);
+    assert!(service.status.success());
+    let status = run(&root, &["daemon", "status"]);
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("active"));
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let root = std::env::temp_dir().join(format!(
         "relay-daemon-test-{}",
