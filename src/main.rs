@@ -98,7 +98,7 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
             |r| r.get(0),
         )
         .unwrap_or_default();
-    let state = if last.is_empty() {
+    let mut state = if last.is_empty() {
         "UNKNOWN"
     } else if last == now {
         "FRESH"
@@ -110,6 +110,9 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
         params![now],
         |r| r.get(0),
     )?;
+    if broken > 0 {
+        state = "BROKEN";
+    }
     let note: String = c
         .query_row(
             "SELECT text FROM annotations WHERE snapshot=?1 ORDER BY id DESC LIMIT 1",
@@ -195,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let s = snapshot(&root);
             c.execute(
                 "INSERT INTO annotations(snapshot,text) VALUES(?1,?2)",
-                params![s, text],
+                params![s, format!("annotation#{}", &hash(text.as_bytes())[..12])],
             )?;
             print!("{}", card(&root, &c)?);
         }
