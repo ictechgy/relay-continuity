@@ -54,8 +54,7 @@ fn snapshot(root: &Path) -> String {
     hash(format!("{}\n{}", git(root, &["rev-parse", "HEAD"]), dirty(root)).as_bytes())
 }
 fn safe_command(command: &str) -> String {
-    let first = command.split_whitespace().next().unwrap_or("unknown");
-    format!("{}#{}", first, &hash(command.as_bytes())[..12])
+    format!("command#{}", &hash(command.as_bytes())[..12])
 }
 fn safe_path(path: &str) -> String {
     let lower = path.to_ascii_lowercase();
@@ -120,8 +119,15 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
         params![now],
         |r| r.get(0),
     )?;
+    let prior: i64 = c.query_row(
+        "SELECT COUNT(*) FROM assertions WHERE snapshot != ?1",
+        params![now],
+        |r| r.get(0),
+    )?;
     if broken > 0 {
         state = "BROKEN";
+    } else if state == "FRESH" && prior > 0 {
+        state = "STALE";
     }
     let note: String = c
         .query_row(
