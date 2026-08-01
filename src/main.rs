@@ -730,7 +730,11 @@ mod tests {
         let c = db(&root).unwrap();
         observe(&root, &c).unwrap();
         fs::write(root.join("a.txt"), "two").unwrap();
-        assert!(card(&root, &c).unwrap().contains("STATUS: STALE"));
+        let first = card(&root, &c).unwrap();
+        let second = card(&root, &c).unwrap();
+        assert!(first.contains("STATUS: STALE"));
+        assert_eq!(first, second);
+        assert!(first.split_whitespace().count() <= 800);
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
