@@ -193,6 +193,38 @@ fn run_daemon(root: &Path, c: &Connection) -> Result<(), Box<dyn std::error::Err
         }
     }
 }
+fn record_check(root: &Path, c: &Connection, code: i32, command: &str) -> rusqlite::Result<String> {
+    let s = snapshot(root);
+    let label = safe_command(command);
+    c.execute(
+        "INSERT INTO checks(snapshot,command,exit_code) VALUES(?1,?2,?3)",
+        params![s, label, code],
+    )?;
+    let id = c.last_insert_rowid();
+    c.execute(
+        "INSERT INTO assertions(snapshot,claim,status,check_id) VALUES(?1,?2,?3,?4)",
+        params![s, "check", if code == 0 { "valid" } else { "broken" }, id],
+    )?;
+    c.execute(
+        "INSERT INTO events(kind,snapshot,detail) VALUES('check',?1,?2)",
+        params![s, code.to_string()],
+    )?;
+    card(root, c)
+}
+fn shell_hook(shell: &str) -> Result<&'static str, Box<dyn std::error::Error>> {
+    match shell {
+        "zsh" => Ok(
+            "function _relay_capture() { local status=$?; relay record-check \"$status\" \"$(fc -ln -1)\" >/dev/null 2>&1; }\nprecmd_functions+=(_relay_capture)\n",
+        ),
+        "bash" => Ok(
+            "_relay_capture() { local status=$?; relay record-check \"$status\" \"$(history 1)\" >/dev/null 2>&1; }\nPROMPT_COMMAND='_relay_capture'${PROMPT_COMMAND:+\"; $PROMPT_COMMAND\"}\n",
+        ),
+        "fish" => Ok(
+            "function _relay_capture --on-event fish_postexec\n  relay record-check $status \"$argv\" >/dev/null 2>&1\nend\n",
+        ),
+        _ => Err("usage: relay shell <zsh|bash|fish>".into()),
+    }
+}
 fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
     let now = snapshot(root);
     let last: String = c
@@ -311,6 +343,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("run") => run_daemon(&root, &c)?,
             _ => return Err("usage: relay daemon <start|stop|status>".into()),
         },
+        "shell" => print!("{}", shell_hook(a.next().as_deref().unwrap_or(""))?),
         "compact" => {
             let events: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
             let checks: i64 = c.query_row("SELECT COUNT(*) FROM checks", [], |r| r.get(0))?;
@@ -346,28 +379,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .status()?
                 .code()
                 .unwrap_or(1);
-            let s = snapshot(&root);
-            let label = safe_command(&command);
-            c.execute(
-                "INSERT INTO checks(snapshot,command,exit_code) VALUES(?1,?2,?3)",
-                params![s, label, code],
-            )?;
-            let id = c.last_insert_rowid();
-            c.execute(
-                "INSERT INTO assertions(snapshot,claim,status,check_id) VALUES(?1,?2,?3,?4)",
-                params![s, "check", if code == 0 { "valid" } else { "broken" }, id],
-            )?;
-            c.execute(
-                "INSERT INTO events(kind,snapshot,detail) VALUES('check',?1,?2)",
-                params![s, code.to_string()],
-            )?;
-            print!("{}", card(&root, &c)?);
+            print!("{}", record_check(&root, &c, code, &command)?);
             if code != 0 {
                 std::process::exit(code)
             }
         }
+        "record-check" => {
+            let code = a
+                .next()
+                .ok_or("usage: relay record-check <exit-code> <command>")?
+                .parse::<i32>()?;
+            let command = a.collect::<Vec<_>>().join(" ");
+            if command.is_empty() {
+                return Err("usage: relay record-check <exit-code> <command>".into());
+            }
+            print!("{}", record_check(&root, &c, code, &command)?);
+        }
         _ => println!(
-            "relay init | observe | watch [seconds] | daemon <start|stop|status> | compact | note <text> | status | resume | check <command>"
+            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | note <text> | status | resume | check <command>"
         ),
     };
     Ok(())

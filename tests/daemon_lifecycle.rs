@@ -80,6 +80,30 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
         event_count, 2,
         "the write burst must coalesce into one event"
     );
+    drop(database);
+
+    let broken = run(&root, &["record-check", "1", "deploy --token top-secret"]);
+    assert!(broken.status.success());
+    assert!(String::from_utf8_lossy(&broken.stdout).contains("STATUS: BROKEN"));
+    let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("reopen evidence");
+    let command: String = database
+        .query_row(
+            "SELECT command FROM checks ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read safe command");
+    assert!(command.starts_with("command#"));
+    assert!(!command.contains("top-secret"));
+    assert!(
+        !fs::read_to_string(root.join(".relay/current.md"))
+            .expect("read card")
+            .contains("top-secret")
+    );
+    drop(database);
+    let hook = run(&root, &["shell", "zsh"]);
+    assert!(hook.status.success());
+    assert!(String::from_utf8_lossy(&hook.stdout).contains("record-check"));
 
     assert!(run(&root, &["daemon", "stop"]).status.success());
     assert!(

@@ -29,3 +29,9 @@ active and keeps semantic context explicitly `unknown` without an adapter.
 `relay note <text>` writes an explicitly unverified, hashed annotation. The
 legacy `relay watch 60` command remains a foreground polling diagnostic, not
 the normal automatic-capture path.
+
+For terminal checks, run `relay shell zsh`, `relay shell bash`, or `relay shell
+fish` once and add its emitted hook to the matching shell configuration. The
+hook calls `relay record-check` after commands, which hashes the command before
+it reaches SQLite. It is opt-in because shell history itself can be sensitive;
+Relay does not modify shell profiles automatically.
