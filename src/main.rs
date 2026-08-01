@@ -223,9 +223,21 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
                 return Ok(state.into());
             }
             let root_hash = hash(root.to_string_lossy().as_bytes());
-            let owned_matches = fs::read(integration_owned_path(root, provider))
-                .map(|owned| values.get("config_hash") == Some(&hash(&owned)))
-                .unwrap_or(false);
+            let Ok(owned) = fs::read(integration_owned_path(root, provider)) else {
+                return Ok("drifted".into());
+            };
+            let owned_values = String::from_utf8(owned.clone()).ok().map(|text| {
+                text.lines()
+                    .filter_map(|line| line.split_once('='))
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+            });
+            let owned_matches = values.get("config_hash") == Some(&hash(&owned))
+                && owned_values.as_ref().is_some_and(|owned_values| {
+                    owned_values.get("version").map(String::as_str) == Some("1")
+                        && owned_values.get("provider").map(String::as_str) == Some(provider)
+                        && owned_values.get("state").map(String::as_str) == Some(state)
+                });
             if values.get("root_hash") != Some(&root_hash) || !owned_matches {
                 return Ok("drifted".into());
             }
@@ -384,6 +396,7 @@ fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let values = integration_manifest_values(root, "codex")?;
     if integration_state(root, "codex")? != "awaiting_trust"
         || !codex_hook_matches_manifest(root, &values)
+        || !codex_owned_provenance(root, &hook)
     {
         return Err(
             "Relay Codex integration is not an unchanged awaiting-trust installation".into(),

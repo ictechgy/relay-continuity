@@ -194,13 +194,15 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
         &manifest_path,
         manifest.replace("state=unavailable", "state=ready"),
     )
-    .expect("mark disposable adapter ready");
-    assert!(run(&root, &["daemon", "start"]).status.success());
+    .expect("attempt unsupported adapter promotion");
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "claude"]).stdout)
+            .contains("claude: drifted")
+    );
     let emitted = run(&root, &["integration", "emit", "claude"]);
     assert!(emitted.status.success());
-    assert!(String::from_utf8_lossy(&emitted.stdout).contains("# Relay context"));
+    assert!(String::from_utf8_lossy(&emitted.stdout).contains("integration drifted"));
     assert!(!String::from_utf8_lossy(&emitted.stdout).contains(secret));
-    assert!(run(&root, &["daemon", "stop"]).status.success());
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
