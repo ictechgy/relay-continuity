@@ -230,6 +230,30 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .expect("read note card")
             .contains("operator-secret-should-never-persist")
     );
+    let database =
+        Connection::open(root.join(".relay/evidence.sqlite")).expect("count adapter baseline");
+    let before_adapter_events: i64 = database
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("count adapter baseline events");
+    drop(database);
+    let malformed = run(
+        &root,
+        &["adapter", "test-provider", "{malformed-secret-payload"],
+    );
+    assert!(!malformed.status.success());
+    let database =
+        Connection::open(root.join(".relay/evidence.sqlite")).expect("count adapter result");
+    let after_adapter_events: i64 = database
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("count adapter result events");
+    assert_eq!(after_adapter_events, before_adapter_events);
+    drop(database);
+    assert!(
+        !fs::read(root.join(".relay/evidence.sqlite"))
+            .expect("read adapter evidence")
+            .windows(b"malformed-secret-payload".len())
+            .any(|bytes| bytes == b"malformed-secret-payload")
+    );
     let hook = run(&root, &["shell", "zsh"]);
     assert!(hook.status.success());
     assert!(String::from_utf8_lossy(&hook.stdout).contains("record-check"));

@@ -53,4 +53,8 @@ source, diffs, outputs, or annotations.
 | GUI context injection or quota-end detection | Unsupported |
 | Provider adapters | Not shipped in v0.1; the generic core remains available |
 
+`relay adapter <provider> <metadata>` rejects all input in v0.1. This explicit
+boundary prevents malformed or provider-shaped metadata from being mistaken for
+verified evidence or entering the core database.
+
 Relay carries observable work evidence, not a complete AI thought process.

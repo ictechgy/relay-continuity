@@ -562,6 +562,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err("usage: relay daemon <start|stop|status>".into()),
         },
         "shell" => print!("{}", shell_hook(a.next().as_deref().unwrap_or(""))?),
+        "adapter" => {
+            let provider = a.next().unwrap_or_default();
+            let has_metadata = a.next().is_some();
+            if provider.is_empty() || !has_metadata {
+                return Err("usage: relay adapter <provider> <metadata>".into());
+            }
+            return Err("Relay v0.1 has no installed adapters; metadata was rejected".into());
+        }
         "compact" => {
             let _lock = writer_lock(&root)?;
             let events: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
@@ -617,7 +625,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", record_check(&root, &c, code, &command)?);
         }
         _ => println!(
-            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
+            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | check <command>"
         ),
     };
     Ok(())
