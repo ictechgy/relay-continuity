@@ -10,7 +10,8 @@ fn db(root: &Path) -> rusqlite::Result<Connection> {
     c.execute_batch("PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, snapshot TEXT NOT NULL, detail TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-      CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);" )?;
+      CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);
+      CREATE TABLE IF NOT EXISTS epochs(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, event_count INTEGER NOT NULL, check_count INTEGER NOT NULL, summary_hash TEXT NOT NULL);" )?;
     Ok(c)
 }
 fn git(root: &Path, args: &[&str]) -> String { Command::new("git").args(args).current_dir(root).output().ok().and_then(|o| String::from_utf8(o.stdout).ok()).unwrap_or_default().trim().to_owned() }
@@ -42,9 +43,10 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
   "init"=>{let s=snapshot(&root);c.execute("INSERT INTO events(kind,snapshot,detail) VALUES('init',?1,'local-only')",params![s])?; fs::write(relay_dir(&root).join(".gitignore"),"evidence.sqlite*\ncurrent.md\n")?; println!("initialized {}",relay_dir(&root).display());}
   "observe"=>{observe(&root,&c)?; print!("{}",card(&root,&c)?);}
   "watch"=>{let seconds=a.next().and_then(|s|s.parse::<u64>().ok()).unwrap_or(60); let mut n=0; for _ in 0..seconds { if observe(&root,&c)? {n+=1}; thread::sleep(Duration::from_secs(1)); } println!("observed {n} coalesced snapshot changes"); print!("{}",card(&root,&c)?);}
+  "compact"=>{let events:i64=c.query_row("SELECT COUNT(*) FROM events",[],|r|r.get(0))?; let checks:i64=c.query_row("SELECT COUNT(*) FROM checks",[],|r|r.get(0))?; let summary=hash(format!("{events}:{checks}").as_bytes()); c.execute("INSERT INTO epochs(event_count,check_count,summary_hash) VALUES(?1,?2,?3)",params![events,checks,summary])?; println!("created privacy-safe epoch for {events} events and {checks} checks");}
   "status"|"resume"=>print!("{}",card(&root,&c)?),
   "check"=>{let command=a.collect::<Vec<_>>().join(" "); if command.is_empty(){return Err("usage: relay check <program> [args]".into())}; let code=Command::new("sh").arg("-c").arg(&command).current_dir(&root).status()?.code().unwrap_or(1); let s=snapshot(&root); let label=safe_command(&command); c.execute("INSERT INTO checks(snapshot,command,exit_code) VALUES(?1,?2,?3)",params![s,label,code])?; let id=c.last_insert_rowid(); c.execute("INSERT INTO assertions(snapshot,claim,status,check_id) VALUES(?1,?2,?3,?4)",params![s,"check",if code==0{"valid"}else{"broken"},id])?; c.execute("INSERT INTO events(kind,snapshot,detail) VALUES('check',?1,?2)",params![s,code.to_string()])?; print!("{}",card(&root,&c)?); if code!=0{std::process::exit(code)}}
-  _=>println!("relay init | observe | watch [seconds] | status | resume | check <command>")
+  _=>println!("relay init | observe | watch [seconds] | compact | status | resume | check <command>")
  }; Ok(())
 }
 
