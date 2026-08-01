@@ -168,6 +168,37 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     }
     assert!(transition_seen, "HEAD transition was not observed");
 
+    assert!(
+        Command::new("git")
+            .args(["checkout", "-b", "relay-branch-transition"])
+            .current_dir(&root)
+            .status()
+            .expect("checkout branch")
+            .success()
+    );
+    let mut branch_seen = false;
+    for _ in 0..24 {
+        let resume = run(&root, &["resume"]);
+        let database =
+            Connection::open(root.join(".relay/evidence.sqlite")).expect("read branch event");
+        let branch_events: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='branch-change'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count branch events");
+        if resume.status.success()
+            && String::from_utf8_lossy(&resume.stdout).contains("STATUS: FRESH")
+            && branch_events == 1
+        {
+            branch_seen = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(branch_seen, "branch transition was not observed");
+
     let broken = run(&root, &["record-check", "1", "deploy --token top-secret"]);
     assert!(broken.status.success());
     assert!(String::from_utf8_lossy(&broken.stdout).contains("STATUS: BROKEN"));
