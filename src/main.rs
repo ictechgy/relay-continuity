@@ -159,7 +159,13 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
             "Evidence is snapshot-bound; intent remains unknown unless annotated."
         }
     );
-    fs::write(relay_dir(root).join("current.md"), &text).expect("write card");
+    if text.split_whitespace().count() > 800 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let destination = relay_dir(root).join("current.md");
+    let temporary = relay_dir(root).join("current.md.tmp");
+    fs::write(&temporary, &text).expect("write temporary card");
+    fs::rename(temporary, destination).expect("atomically replace card");
     Ok(text)
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
