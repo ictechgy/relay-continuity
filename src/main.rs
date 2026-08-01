@@ -38,17 +38,33 @@ impl Drop for WriterLock {
 }
 fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
     let path = writer_lock_path(root);
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut file) => {
-            write!(file, "{}", std::process::id())?;
-            file.sync_all()?;
-            Ok(WriterLock(path))
+    for attempt in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                write!(file, "{}", std::process::id())?;
+                file.sync_all()?;
+                return Ok(WriterLock(path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                let owner = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<u32>().ok());
+                if owner.is_none_or(|pid| !process_active(pid)) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                return Err("Relay writer is busy; retry without modifying evidence".into());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err("Relay writer is busy; retry without modifying evidence".into());
+            }
+            Err(error) => return Err(error.into()),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err("Relay writer is busy; retry without modifying evidence".into())
-        }
-        Err(error) => Err(error.into()),
     }
+    Err("Relay writer is busy; retry without modifying evidence".into())
+}
+fn writer_busy(error: &dyn std::error::Error) -> bool {
+    error.to_string() == "Relay writer is busy; retry without modifying evidence"
 }
 fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let ok = Command::new("git")
@@ -238,6 +254,7 @@ fn read_nonce(root: &Path) -> Option<String> {
 fn process_active(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -341,7 +358,11 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(root, RecursiveMode::Recursive)?;
     fs::write(ready_path(root), nonce)?;
-    observe(root, c)?;
+    if let Err(error) = observe(root, c) {
+        if !writer_busy(error.as_ref()) {
+            return Err(error);
+        }
+    }
     let mut pending: Option<Instant> = None;
     loop {
         if fs::read_to_string(stop_path(root)).ok().as_deref() == Some(nonce) {
@@ -356,10 +377,18 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
             Ok(Ok(event)) if event_is_relevant(root, &event) => pending = Some(Instant::now()),
             Ok(Ok(_)) | Ok(Err(_)) => {}
             Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
-                observe(root, c)?;
+                if let Err(error) = observe(root, c) {
+                    if !writer_busy(error.as_ref()) {
+                        return Err(error);
+                    }
+                }
             }
             Err(RecvTimeoutError::Timeout) => {
-                observe(root, c)?;
+                if let Err(error) = observe(root, c) {
+                    if !writer_busy(error.as_ref()) {
+                        return Err(error);
+                    }
+                }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 return Err("filesystem watcher disconnected".into());
@@ -691,6 +720,11 @@ mod tests {
         assert!(writer_lock_path(&root).exists());
         drop(first);
         assert!(writer_lock(&root).is_ok());
+        fs::write(writer_lock_path(&root), "999999999").unwrap();
+        assert!(
+            writer_lock(&root).is_ok(),
+            "dead lock owner must be reclaimed"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
