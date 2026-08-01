@@ -1,11 +1,15 @@
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::{
-    env, fs,
+    env,
+    fs::{self, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc::{RecvTimeoutError, channel},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 fn hash(bytes: &[u8]) -> String {
@@ -13,6 +17,9 @@ fn hash(bytes: &[u8]) -> String {
 }
 fn relay_dir(root: &Path) -> PathBuf {
     root.join(".relay")
+}
+fn pid_path(root: &Path) -> PathBuf {
+    relay_dir(root).join("daemon.pid")
 }
 fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let ok = Command::new("git")
@@ -29,6 +36,7 @@ fn db(root: &Path) -> rusqlite::Result<Connection> {
     fs::create_dir_all(&dir).expect("create .relay");
     let c = Connection::open(dir.join("evidence.sqlite"))?;
     c.execute_batch("PRAGMA journal_mode=WAL;
+      PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, snapshot TEXT NOT NULL, detail TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);
@@ -98,6 +106,93 @@ fn observe(root: &Path, c: &Connection) -> rusqlite::Result<bool> {
     }
     Ok(false)
 }
+fn read_pid(root: &Path) -> Option<u32> {
+    fs::read_to_string(pid_path(root)).ok()?.trim().parse().ok()
+}
+fn process_active(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+fn daemon_active(root: &Path) -> bool {
+    read_pid(root).is_some_and(process_active)
+}
+fn daemon_state(root: &Path) -> &'static str {
+    if daemon_active(root) {
+        "active"
+    } else {
+        "unavailable"
+    }
+}
+fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if daemon_active(root) {
+        return Err("Relay daemon is already active".into());
+    }
+    let _ = fs::remove_file(pid_path(root));
+    let mut pid_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pid_path(root))?;
+    let child = match Command::new(env::current_exe()?)
+        .args(["daemon", "run"])
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(pid_path(root));
+            return Err(error.into());
+        }
+    };
+    write!(pid_file, "{}", child.id())?;
+    pid_file.sync_all()?;
+    println!("Relay daemon started (pid {})", child.id());
+    Ok(())
+}
+fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(pid) = read_pid(root) else {
+        return Err("Relay daemon is not running".into());
+    };
+    if process_active(pid) {
+        let status = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()?;
+        if !status.success() {
+            return Err("Relay daemon could not be stopped".into());
+        }
+    }
+    fs::remove_file(pid_path(root))?;
+    println!("Relay daemon stopped");
+    Ok(())
+}
+fn run_daemon(root: &Path, c: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    let (tx, rx) = channel();
+    let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
+    watcher.watch(root, RecursiveMode::Recursive)?;
+    observe(root, c)?;
+    let mut pending: Option<Instant> = None;
+    loop {
+        let timeout = pending
+            .map(|changed| Duration::from_millis(750).saturating_sub(changed.elapsed()))
+            .unwrap_or(Duration::from_secs(60));
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(_)) => pending = Some(Instant::now()),
+            Ok(Err(_)) => pending = Some(Instant::now()),
+            Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
+                observe(root, c)?;
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err("filesystem watcher disconnected".into());
+            }
+        }
+    }
+}
 fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
     let now = snapshot(root);
     let last: String = c
@@ -145,7 +240,8 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
         .collect::<Vec<_>>()
         .join(", ");
     let text = format!(
-        "# Relay context\n\nSTATUS: {state}\nSnapshot: {now}\nBranch: {}\nChanged: {}\nChecks: {}\nNote (unverified): {note}\n\n{}\n",
+        "# Relay context\n\nSTATUS: {state}\nCapture: {}\nSnapshot: {now}\nBranch: {}\nChanged: {}\nChecks: {}\nSemantic context: unknown (no vendor adapter required)\nNote (unverified): {note}\n\n{}\n",
+        daemon_state(root),
         safe_path(&git(root, &["branch", "--show-current"])),
         if changed.is_empty() { "none" } else { &changed },
         if broken > 0 {
@@ -183,7 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             fs::write(
                 relay_dir(&root).join(".gitignore"),
-                "evidence.sqlite*\ncurrent.md\n",
+                "evidence.sqlite*\ncurrent.md\ndaemon.pid\n",
             )?;
             let exclude = root.join(".git/info/exclude");
             let existing = fs::read_to_string(&exclude).unwrap_or_default();
@@ -208,6 +304,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("observed {n} coalesced snapshot changes");
             print!("{}", card(&root, &c)?);
         }
+        "daemon" => match a.next().as_deref() {
+            Some("start") => start_daemon(&root)?,
+            Some("stop") => stop_daemon(&root)?,
+            Some("status") => println!("Capture: {}", daemon_state(&root)),
+            Some("run") => run_daemon(&root, &c)?,
+            _ => return Err("usage: relay daemon <start|stop|status>".into()),
+        },
         "compact" => {
             let events: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
             let checks: i64 = c.query_row("SELECT COUNT(*) FROM checks", [], |r| r.get(0))?;
@@ -264,7 +367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => println!(
-            "relay init | observe | watch [seconds] | compact | note <text> | status | resume | check <command>"
+            "relay init | observe | watch [seconds] | daemon <start|stop|status> | compact | note <text> | status | resume | check <command>"
         ),
     };
     Ok(())

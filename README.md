@@ -19,6 +19,13 @@ raw command output.
 
 `cargo test` runs the local test suite. The project is local-only by design.
 
-`relay init` creates local ignored state. `relay watch 60` polls Git snapshots,
+`relay init` creates local ignored state. `relay daemon start` runs a local
+filesystem watcher, debounces bursts for 750 ms, and records only a reconciled
+Git snapshot hash; `relay daemon stop` and `relay daemon status` manage and
+inspect that process. `relay status` always says whether generic capture is
+active and keeps semantic context explicitly `unknown` without an adapter.
+
 `relay check <command>` records only a safe command identity and exit code, and
-`relay note <text>` writes an explicitly unverified annotation.
+`relay note <text>` writes an explicitly unverified, hashed annotation. The
+legacy `relay watch 60` command remains a foreground polling diagnostic, not
+the normal automatic-capture path.
