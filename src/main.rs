@@ -30,6 +30,233 @@ fn writer_lock_path(root: &Path) -> PathBuf {
 fn stop_path(root: &Path) -> PathBuf {
     relay_dir(root).join("daemon.stop")
 }
+fn integration_dir(root: &Path) -> PathBuf {
+    relay_dir(root).join("integrations")
+}
+fn integration_manifest_path(root: &Path, provider: &str) -> PathBuf {
+    integration_dir(root).join(format!("{provider}.state"))
+}
+fn integration_owned_path(root: &Path, provider: &str) -> PathBuf {
+    integration_dir(root).join(format!("{provider}.owned"))
+}
+fn integration_provider_is_valid(provider: &str) -> bool {
+    matches!(provider, "codex" | "claude" | "grok")
+}
+fn integration_marker(provider: &str, begin: bool) -> Vec<u8> {
+    format!(
+        "# relay-managed-{}:{provider}\n",
+        if begin { "begin" } else { "end" }
+    )
+    .into_bytes()
+}
+fn find_all(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return Vec::new();
+    }
+    haystack
+        .windows(needle.len())
+        .enumerate()
+        .filter_map(|(index, window)| (window == needle).then_some(index))
+        .collect()
+}
+fn owned_block(provider: &str, body: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if !integration_provider_is_valid(provider) {
+        return Err("Relay rejected an unsupported integration provider".into());
+    }
+    if body
+        .windows(b"relay-managed-".len())
+        .any(|window| window == b"relay-managed-")
+    {
+        return Err("Relay rejected nested integration markers".into());
+    }
+    let mut block = integration_marker(provider, true);
+    block.extend_from_slice(body);
+    if !body.ends_with(b"\n") {
+        block.push(b'\n');
+    }
+    block.extend_from_slice(&integration_marker(provider, false));
+    Ok(block)
+}
+fn patch_owned_block(
+    current: &[u8],
+    provider: &str,
+    body: &[u8],
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let begin = integration_marker(provider, true);
+    let end = integration_marker(provider, false);
+    let begins = find_all(current, &begin);
+    let ends = find_all(current, &end);
+    if begins.len() > 1 || ends.len() > 1 || begins.len() != ends.len() {
+        return Err("Relay integration config drifted; no file was changed".into());
+    }
+    let block = owned_block(provider, body)?;
+    if begins.is_empty() {
+        let mut patched = current.to_vec();
+        if !patched.is_empty() && !patched.ends_with(b"\n") {
+            patched.push(b'\n');
+        }
+        patched.extend_from_slice(&block);
+        return Ok(patched);
+    }
+    let start = begins[0];
+    let finish = ends[0] + end.len();
+    if finish <= start {
+        return Err("Relay integration config drifted; no file was changed".into());
+    }
+    let mut patched = current[..start].to_vec();
+    patched.extend_from_slice(&block);
+    patched.extend_from_slice(&current[finish..]);
+    Ok(patched)
+}
+fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = path
+        .parent()
+        .ok_or("Relay integration config has no parent directory")?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or("Relay integration config has an unsafe file name")?;
+    let temporary = parent.join(format!(
+        ".{file_name}.relay-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        if hash(&fs::read(path)?) != hash(bytes) {
+            return Err("Relay could not verify atomic integration write".into());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+fn write_integration_manifest(
+    root: &Path,
+    provider: &str,
+    state: &str,
+    config_bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !integration_provider_is_valid(provider)
+        || !matches!(
+            state,
+            "disabled" | "awaiting_trust" | "ready" | "unavailable" | "drifted" | "broken"
+        )
+    {
+        return Err("Relay rejected malformed integration state".into());
+    }
+    fs::create_dir_all(integration_dir(root))?;
+    let root_hash = hash(root.to_string_lossy().as_bytes());
+    let manifest = format!(
+        "version=1\nprovider={provider}\nstate={state}\nroot_hash={root_hash}\nconfig_hash={}\n",
+        hash(config_bytes)
+    );
+    atomic_replace(
+        &integration_manifest_path(root, provider),
+        manifest.as_bytes(),
+    )
+}
+fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if !integration_provider_is_valid(provider) {
+        return Err("Relay rejected an unsupported integration provider".into());
+    }
+    let path = integration_manifest_path(root, provider);
+    if !path.exists() {
+        return Ok("disabled".into());
+    }
+    let text = fs::read_to_string(path)?;
+    let values = text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if values.get("version") != Some(&"1") || values.get("provider") != Some(&provider) {
+        return Ok("broken".into());
+    }
+    match values.get("state").copied() {
+        Some("disabled" | "awaiting_trust" | "ready" | "unavailable" | "drifted" | "broken") => {
+            Ok(values["state"].into())
+        }
+        _ => Ok("broken".into()),
+    }
+}
+fn integration_command(
+    root: &Path,
+    mut args: impl Iterator<Item = String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match args.next().as_deref() {
+        Some("status") => {
+            let providers = match args.next() {
+                Some(provider) => vec![provider],
+                None => vec!["codex".into(), "claude".into(), "grok".into()],
+            };
+            if args.next().is_some() {
+                return Err("usage: relay integration status [codex|claude|grok]".into());
+            }
+            for provider in providers {
+                println!("{provider}: {}", integration_state(root, &provider)?);
+            }
+            Ok(())
+        }
+        Some("plan") => {
+            let provider = args
+                .next()
+                .ok_or("usage: relay integration plan <codex|claude|grok> <config-path>")?;
+            let config = args
+                .next()
+                .ok_or("usage: relay integration plan <codex|claude|grok> <config-path>")?;
+            if args.next().is_some() || !integration_provider_is_valid(&provider) {
+                return Err(
+                    "usage: relay integration plan <codex|claude|grok> <config-path>".into(),
+                );
+            }
+            let current = fs::read(config)?;
+            let patched = patch_owned_block(&current, &provider, b"# capability-probe-required\n")?;
+            println!(
+                "{provider}: preview only; config#{} -> config#{}; no files changed",
+                &hash(&current)[..12],
+                &hash(&patched)[..12]
+            );
+            Ok(())
+        }
+        Some("initialize") => {
+            let provider = args
+                .next()
+                .ok_or("usage: relay integration initialize <codex|claude|grok> --apply")?;
+            let apply = args.next();
+            if apply.as_deref() != Some("--apply")
+                || args.next().is_some()
+                || !integration_provider_is_valid(&provider)
+            {
+                return Err(
+                    "usage: relay integration initialize <codex|claude|grok> --apply".into(),
+                );
+            }
+            fs::create_dir_all(integration_dir(root))?;
+            let owned = format!(
+                "version=1\nprovider={provider}\nstate=unavailable\nreason=capability-probe-required\n"
+            );
+            atomic_replace(&integration_owned_path(root, &provider), owned.as_bytes())?;
+            write_integration_manifest(root, &provider, "unavailable", owned.as_bytes())?;
+            println!("{provider}: Relay-owned integration state initialized; capability probe required");
+            Ok(())
+        }
+        _ => Err(
+            "usage: relay integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply>"
+                .into(),
+        ),
+    }
+}
 struct WriterLock(PathBuf);
 impl Drop for WriterLock {
     fn drop(&mut self) {
@@ -646,12 +873,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = a.next().unwrap_or_else(|| "help".into());
     if cmd == "help" {
         println!(
-            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
+            "relay init | integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
         );
         return Ok(());
     }
     let root = env::current_dir()?;
     ensure_git(&root)?;
+    if cmd == "integration" {
+        return integration_command(&root, a);
+    }
     let c = db(&root)?;
     match cmd.as_str() {
         "init" => {
@@ -777,7 +1007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", record_check(&root, &c, code, &command)?);
         }
         _ => println!(
-            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | check <command>"
+            "relay init | integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | check <command>"
         ),
     };
     Ok(())
@@ -806,6 +1036,74 @@ mod tests {
     #[test]
     fn default_ignores_secret_paths() {
         assert!(ignored(Path::new("."), "config/.env.local"));
+    }
+    #[test]
+    fn owned_config_patch_preserves_foreign_secret_bytes_without_backup() {
+        let foreign = b"api_key = 'ghp_foreign_config_secret'\nformat = 'keep exact spacing'\n";
+        let patched = patch_owned_block(foreign, "codex", b"enabled = true\n").unwrap();
+        assert!(patched.starts_with(foreign));
+        assert_eq!(
+            patched
+                .windows(b"ghp_foreign_config_secret".len())
+                .filter(|bytes| *bytes == b"ghp_foreign_config_secret")
+                .count(),
+            1
+        );
+        let replaced = patch_owned_block(&patched, "codex", b"enabled = false\n").unwrap();
+        assert!(replaced.starts_with(foreign));
+        assert!(replaced.ends_with(b"# relay-managed-end:codex\n"));
+        assert!(
+            !replaced
+                .windows(b"enabled = true".len())
+                .any(|bytes| bytes == b"enabled = true")
+        );
+        assert_eq!(
+            replaced
+                .windows(b"ghp_foreign_config_secret".len())
+                .filter(|bytes| *bytes == b"ghp_foreign_config_secret")
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn malformed_owned_markers_fail_without_a_patch() {
+        let malformed = b"# relay-managed-begin:codex\nforeign = 1\n";
+        assert!(patch_owned_block(malformed, "codex", b"enabled = true\n").is_err());
+        let duplicated = b"# relay-managed-begin:codex\n# relay-managed-end:codex\n# relay-managed-begin:codex\n# relay-managed-end:codex\n";
+        assert!(patch_owned_block(duplicated, "codex", b"enabled = true\n").is_err());
+    }
+    #[test]
+    fn integration_manifest_and_atomic_write_retain_only_hashes() {
+        let root = env::temp_dir().join(format!(
+            "relay-integration-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let config = root.join("settings.toml");
+        atomic_replace(&config, b"foreign_token = 'sk-foreign-secret'\n").unwrap();
+        write_integration_manifest(
+            &root,
+            "codex",
+            "awaiting_trust",
+            &fs::read(&config).unwrap(),
+        )
+        .unwrap();
+        let manifest = fs::read_to_string(integration_manifest_path(&root, "codex")).unwrap();
+        assert_eq!(integration_state(&root, "codex").unwrap(), "awaiting_trust");
+        assert!(!manifest.contains("sk-foreign-secret"));
+        assert!(manifest.contains("config_hash="));
+        assert_eq!(
+            fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp"))
+                .count(),
+            0
+        );
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn epochs_are_explainable_without_source_content() {

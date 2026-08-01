@@ -78,6 +78,45 @@ fn help_runs_without_creating_evidence_outside_a_git_worktree() {
 }
 
 #[test]
+fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_owned_state() {
+    let root = git_fixture("integration-contract-test");
+    let config = root.join("foreign-settings.toml");
+    let secret = "ghp_foreign_config_secret";
+    fs::write(
+        &config,
+        format!("token = '{secret}'\nformatting = ' keep exact spacing '\n"),
+    )
+    .expect("write foreign config");
+    let config_arg = config.to_string_lossy().into_owned();
+    let preview = run(&root, &["integration", "plan", "codex", &config_arg]);
+    assert!(preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("preview only"));
+    assert_eq!(
+        fs::read_to_string(&config).expect("read foreign config"),
+        format!("token = '{secret}'\nformatting = ' keep exact spacing '\n")
+    );
+    assert!(!root.join(".relay").exists());
+
+    let missing_apply = run(&root, &["integration", "initialize", "codex"]);
+    assert!(!missing_apply.status.success());
+    assert!(!root.join(".relay").exists());
+
+    let initialized = run(&root, &["integration", "initialize", "codex", "--apply"]);
+    assert!(initialized.status.success());
+    let state = run(&root, &["integration", "status", "codex"]);
+    assert!(state.status.success());
+    assert!(String::from_utf8_lossy(&state.stdout).contains("codex: unavailable"));
+    let relay_bytes =
+        fs::read(root.join(".relay/integrations/codex.state")).expect("read integration manifest");
+    assert!(!String::from_utf8_lossy(&relay_bytes).contains(secret));
+    assert_eq!(
+        fs::read_to_string(&config).expect("re-read foreign config"),
+        format!("token = '{secret}'\nformatting = ' keep exact spacing '\n")
+    );
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let root = std::env::temp_dir().join(format!(
         "relay-daemon-test-{}",
