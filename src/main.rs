@@ -297,10 +297,7 @@ fn json_escape(value: &str) -> String {
 }
 fn codex_hook_config(_root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let executable = env::current_exe()?.to_string_lossy().into_owned();
-    let command = format!(
-        "{} integration codex hook-output",
-        systemd_quote(&executable)
-    );
+    let command = format!("{} integration codex hook-output", shell_quote(&executable));
     Ok(format!(
         "{{\n  \"description\": \"Relay-owned bounded continuity context for this repository.\",\n  \"hooks\": {{\n    \"SessionStart\": [{{\n      \"matcher\": \"^(startup|resume)$\",\n      \"hooks\": [{{\n        \"type\": \"command\",\n        \"command\": \"{}\",\n        \"statusMessage\": \"Loading Relay continuity context\",\n        \"timeout\": 5,\n        \"additionalContextLimit\": 320\n      }}]\n    }}]\n  }}\n}}\n",
         json_escape(&command)
@@ -400,6 +397,9 @@ fn systemd_quote(value: &str) -> String {
         r#""{}""#,
         value.replace(char::from(92), r"\\").replace('"', r#"\""#)
     )
+}
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 fn service_template(root: &Path, kind: &str) -> Result<String, Box<dyn std::error::Error>> {
     if !service_kind_is_valid(kind) {
@@ -1546,6 +1546,14 @@ mod tests {
         assert!(systemd.contains("WorkingDirectory=\"/tmp/relay & <worktree>\""));
         assert!(systemd.contains("Restart=on-failure"));
         assert!(service_template(root, "unsupported").is_err());
+    }
+    #[test]
+    fn hook_command_shell_quoting_rejects_expansion_syntax() {
+        let quoted = shell_quote("/tmp/relay $HOME `uname` $(whoami) ' spaced\\path");
+        assert_eq!(
+            quoted,
+            "'/tmp/relay $HOME `uname` $(whoami) '\"'\"' spaced\\path'"
+        );
     }
     #[test]
     fn epochs_are_explainable_without_source_content() {
