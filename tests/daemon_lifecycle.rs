@@ -350,6 +350,56 @@ fn relay_rejects_symlinked_repository_managed_directories() {
 
 #[cfg(unix)]
 #[test]
+fn relay_replaces_managed_leaf_symlinks_without_following_them() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("managed-leaf-symlink-test");
+    let outside = std::env::temp_dir().join(format!(
+        "relay-managed-leaf-outside-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&outside).expect("create outside directory");
+    let target = outside.join("target");
+    fs::write(&target, "PRECIOUS").expect("write outside target");
+
+    fs::create_dir_all(root.join(".relay")).expect("create Relay directory");
+    symlink(&target, root.join(".relay/.gitignore")).expect("symlink Relay ignore file");
+    let exclude = root.join(".git/info/exclude");
+    fs::remove_file(&exclude).expect("remove Git exclude file");
+    symlink(&target, &exclude).expect("symlink Git exclude file");
+    assert!(run(&root, &["init"]).status.success());
+    assert_eq!(
+        fs::read_to_string(&target).expect("read outside target"),
+        "PRECIOUS"
+    );
+    assert!(
+        fs::read_to_string(root.join(".relay/.gitignore"))
+            .expect("read Relay ignore")
+            .contains("evidence.sqlite*")
+    );
+    assert!(
+        fs::read_to_string(&exclude)
+            .expect("read Git exclude")
+            .contains(".relay/")
+    );
+
+    assert!(run(&root, &["daemon", "start"]).status.success());
+    symlink(&target, root.join(".relay/daemon.stop")).expect("symlink daemon stop file");
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    assert_eq!(
+        fs::read_to_string(&target).expect("re-read outside target"),
+        "PRECIOUS"
+    );
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(outside).expect("remove outside directory");
+}
+
+#[cfg(unix)]
+#[test]
 fn codex_install_and_trust_recover_exact_interrupted_owned_state() {
     let root = git_fixture("codex-interrupted-state-test");
     assert!(
@@ -398,6 +448,31 @@ fn codex_install_and_trust_recover_exact_interrupted_owned_state() {
     assert!(
         String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
             .contains("codex: ready")
+    );
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn codex_install_recovers_a_legacy_hook_only_interruption() {
+    let root = git_fixture("codex-hook-only-interruption-test");
+    assert!(
+        run(&root, &["integration", "codex", "install", "--apply"])
+            .status
+            .success()
+    );
+    fs::remove_file(root.join(".relay/integrations/codex.owned"))
+        .expect("remove interrupted owned state");
+    fs::remove_file(root.join(".relay/integrations/codex.state"))
+        .expect("remove interrupted manifest");
+    assert!(
+        run(&root, &["integration", "codex", "install", "--apply"])
+            .status
+            .success()
+    );
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
+            .contains("codex: awaiting_trust")
     );
     fs::remove_dir_all(root).expect("remove fixture");
 }

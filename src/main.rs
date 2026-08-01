@@ -441,9 +441,10 @@ fn codex_manifest_matches_or_is_missing(
     match fs::read(integration_manifest_path(root, "codex")) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(error) => Err(error.into()),
-        // A prefix can only be Relay's interrupted manifest write, never an
-        // arbitrary replacement. The owned file and hook must still be exact.
-        Ok(current) => Ok(expected.starts_with(&current)),
+        // Current Relay writes complete manifests atomically. Only an exact
+        // prior manifest is trustworthy; a missing file is handled as a
+        // narrowly-scoped legacy recovery case by its callers.
+        Ok(current) => Ok(expected == current),
     }
 }
 fn codex_owned_state_name(root: &Path, hook: &[u8]) -> Option<&'static str> {
@@ -476,12 +477,38 @@ fn codex_owned_provenance(root: &Path, hook: &[u8]) -> bool {
 fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_config(root)?;
     let hook_path = codex_hook_path(root);
-    ensure_codex_directory(root, true)?;
-    ensure_integration_directory(root, true)?;
+    ensure_codex_directory(root, false)?;
+    ensure_integration_directory(root, false)?;
+    let integration_existed = integration_dir(root).is_dir();
     match fs::read(&hook_path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-        Ok(current) if current == hook && codex_owned_provenance(root, &hook) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            ensure_codex_directory(root, true)?;
+            ensure_integration_directory(root, true)?;
+            let owned = codex_owned_state("awaiting_trust", &hook);
+            // Writing ownership first means a failed hook write leaves no
+            // live hook behind. A retry simply drives the same state forward.
+            atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+            atomic_replace(&hook_path, &hook)?;
+            write_codex_manifest(root, "awaiting_trust", &owned, &hook)
+        }
+        Err(error) => Err(error.into()),
+        Ok(current) if current == hook && codex_owned_provenance(root, &hook) => Ok(()),
+        Ok(current)
+            if current == hook
+                && integration_existed
+                && fs::symlink_metadata(integration_owned_path(root, "codex"))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                && fs::symlink_metadata(integration_manifest_path(root, "codex"))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            // Legacy recovery for the former hook-first install order. The
+            // integration directory must predate this invocation, so a user
+            // cannot turn an orphaned hook into adopted state by recreating
+            // only the hook after Relay ownership was removed.
+            let owned = codex_owned_state("awaiting_trust", &hook);
+            atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+            write_codex_manifest(root, "awaiting_trust", &owned, &hook)
+        }
         Ok(current)
             if current == hook
                 && codex_owned_state_name(root, &hook) == Some("awaiting_trust")
@@ -493,19 +520,13 @@ fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 )? =>
         {
             let owned = codex_owned_state("awaiting_trust", &hook);
-            return write_codex_manifest(root, "awaiting_trust", &owned, &hook);
+            write_codex_manifest(root, "awaiting_trust", &owned, &hook)
         }
-        Ok(_) => {
-            return Err(
-                "Relay refuses to adopt or overwrite an existing Codex hooks.json; no file was changed"
-                    .into(),
-            );
-        }
+        Ok(_) => Err(
+            "Relay refuses to adopt or overwrite an existing Codex hooks.json; no file was changed"
+                .into(),
+        ),
     }
-    atomic_replace(&hook_path, &hook)?;
-    let owned = codex_owned_state("awaiting_trust", &hook);
-    atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
-    write_codex_manifest(root, "awaiting_trust", &owned, &hook)
 }
 fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_preflight(root)?;
@@ -1258,7 +1279,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let _ = fs::write(stop_path(root), &nonce);
+    let _ = atomic_replace(&stop_path(root), nonce.as_bytes());
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
     Err("Relay daemon did not become ready".into())
@@ -1273,7 +1294,7 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Relay daemon state was stale; no process was stopped".into());
     }
     let nonce = read_nonce(root).ok_or("Relay daemon nonce is unavailable")?;
-    fs::write(stop_path(root), nonce)?;
+    atomic_replace(&stop_path(root), nonce.as_bytes())?;
     for _ in 0..75 {
         if !daemon_active(root) {
             let _ = fs::remove_file(pid_path(root));
@@ -1298,7 +1319,7 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     let (tx, rx) = channel();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(root, RecursiveMode::Recursive)?;
-    fs::write(ready_path(root), nonce)?;
+    atomic_replace(&ready_path(root), nonce.as_bytes())?;
     if let Err(error) = observe(root, c)
         && !writer_busy(error.as_ref())
     {
@@ -1314,10 +1335,24 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
         }
         let timeout = pending
             .map(|changed| Duration::from_millis(750).saturating_sub(changed.elapsed()))
-            // Keep stop acknowledgement responsive without polling Git.
-            .unwrap_or(Duration::from_millis(100));
+            // Stop-file writes are watched, so a 500 ms fallback preserves
+            // the stop acknowledgement budget without needless wakeups.
+            .unwrap_or(Duration::from_millis(500));
         match rx.recv_timeout(timeout) {
             Ok(Ok(event)) if event_is_relevant(root, &event) => pending = Some(Instant::now()),
+            // Relay's own ignored writes can keep the watcher busy. Preserve
+            // the periodic Git reconciliation even when they arrive faster
+            // than the receive timeout.
+            Ok(Ok(_)) | Ok(Err(_))
+                if pending.is_none() && last_reconcile.elapsed() >= Duration::from_secs(1) =>
+            {
+                if let Err(error) = observe(root, c)
+                    && !writer_busy(error.as_ref())
+                {
+                    return Err(error);
+                }
+                last_reconcile = Instant::now();
+            }
             Ok(Ok(_)) | Ok(Err(_)) => {}
             Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
                 if let Err(error) = observe(root, c)
@@ -1329,8 +1364,8 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
             }
             Err(RecvTimeoutError::Timeout) => {
                 // Filesystem events are the fast path. Reconcile only once
-                // every five seconds when a platform coalesces or drops one.
-                if last_reconcile.elapsed() >= Duration::from_secs(5) {
+                // every second when a platform coalesces or drops one.
+                if last_reconcile.elapsed() >= Duration::from_secs(1) {
                     if let Err(error) = observe(root, c)
                         && !writer_busy(error.as_ref())
                     {
@@ -1457,7 +1492,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
         .optional()?;
     let broken = latest_check.is_some_and(|exit_code| exit_code != 0);
     let prior: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM assertions WHERE snapshot != ?1)",
+        "SELECT EXISTS(SELECT 1 FROM assertions WHERE snapshot < ?1) OR EXISTS(SELECT 1 FROM assertions WHERE snapshot > ?1)",
         params![now],
         |r| r.get::<_, i64>(0).map(|value| value != 0),
     )?;
@@ -1530,14 +1565,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "INSERT INTO events(kind,snapshot,detail) VALUES('repository-binding',?1,?2)",
                 params![s, state_detail(&state)],
             )?;
-            fs::write(
-                relay_dir(&root).join(".gitignore"),
-                "evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\ndaemon.stop\nwriter.lock\n",
+            atomic_replace(
+                &relay_dir(&root).join(".gitignore"),
+                b"evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\ndaemon.stop\nwriter.lock\n",
             )?;
             let exclude = root.join(".git/info/exclude");
             let existing = fs::read_to_string(&exclude).unwrap_or_default();
             if !existing.lines().any(|line| line == ".relay/") {
-                fs::write(exclude, format!("{existing}\n.relay/\n"))?;
+                atomic_replace(&exclude, format!("{existing}\n.relay/\n").as_bytes())?;
             }
             println!("initialized {}", relay_dir(&root).display());
         }
