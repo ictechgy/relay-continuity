@@ -121,6 +121,53 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     );
     drop(database);
 
+    assert!(
+        Command::new("git")
+            .args(["add", "tracked.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("stage transition")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Relay",
+                "-c",
+                "user.email=relay@example.test",
+                "commit",
+                "-m",
+                "transition"
+            ])
+            .current_dir(&root)
+            .status()
+            .expect("commit transition")
+            .success()
+    );
+    let mut transition_seen = false;
+    for _ in 0..24 {
+        let resume = run(&root, &["resume"]);
+        let database =
+            Connection::open(root.join(".relay/evidence.sqlite")).expect("read transition");
+        let head_events: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='head-change'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count head events");
+        if resume.status.success()
+            && String::from_utf8_lossy(&resume.stdout).contains("STATUS: FRESH")
+            && head_events == 1
+        {
+            transition_seen = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(transition_seen, "HEAD transition was not observed");
+
     let broken = run(&root, &["record-check", "1", "deploy --token top-secret"]);
     assert!(broken.status.success());
     assert!(String::from_utf8_lossy(&broken.stdout).contains("STATUS: BROKEN"));
