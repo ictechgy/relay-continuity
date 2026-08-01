@@ -81,6 +81,7 @@ fn create_schema(c: &Connection) -> rusqlite::Result<()> {
         "PRAGMA journal_mode=WAL;
       PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, snapshot TEXT NOT NULL, detail TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS event_paths(id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL, path TEXT NOT NULL, path_hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);
       CREATE TABLE IF NOT EXISTS epochs(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, event_count INTEGER NOT NULL, check_count INTEGER NOT NULL, summary_hash TEXT NOT NULL);
@@ -138,6 +139,13 @@ fn dirty(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
         })
         .collect::<Vec<_>>()
         .join("\n"))
+}
+fn dirty_paths(root: &Path) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    Ok(dirty(root)?
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .map(|path| (safe_path(path), hash(path.as_bytes())))
+        .collect())
 }
 struct RepositoryState {
     head: String,
@@ -232,6 +240,13 @@ fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Erro
             "INSERT INTO events(kind,snapshot,detail) VALUES(?1,?2,?3)",
             params![event_kind(&last.1, &detail), s, detail],
         )?;
+        let event_id = c.last_insert_rowid();
+        for (path, path_hash) in dirty_paths(root)? {
+            c.execute(
+                "INSERT INTO event_paths(event_id,path,path_hash) VALUES(?1,?2,?3)",
+                params![event_id, path, path_hash],
+            )?;
+        }
         return Ok(true);
     }
     Ok(false)

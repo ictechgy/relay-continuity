@@ -119,6 +119,15 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
         event_count, 2,
         "the write burst must coalesce into one event"
     );
+    let (observed_path, observed_hash): (String, String) = database
+        .query_row(
+            "SELECT p.path,p.path_hash FROM event_paths p JOIN events e ON e.id=p.event_id WHERE e.kind='dirty-set'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read safe dirty-set metadata");
+    assert_eq!(observed_path, "tracked.txt");
+    assert_eq!(observed_hash.len(), 64);
     drop(database);
 
     assert!(
