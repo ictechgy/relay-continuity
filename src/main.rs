@@ -323,6 +323,27 @@ fn record_check(
     )?;
     card(root, c)
 }
+fn explain_epochs(c: &Connection) -> rusqlite::Result<String> {
+    let mut statement = c.prepare(
+        "SELECT id,event_count,check_count,summary_hash FROM epochs ORDER BY id DESC LIMIT 12",
+    )?;
+    let entries = statement
+        .query_map([], |row| {
+            Ok(format!(
+                "epoch {}: events={}, checks={}, summary#{}",
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                &row.get::<_, String>(3)?[..12]
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(if entries.is_empty() {
+        "No compacted epochs recorded.".into()
+    } else {
+        entries.join("\n")
+    })
+}
 fn shell_hook(shell: &str) -> Result<&'static str, Box<dyn std::error::Error>> {
     match shell {
         "zsh" => Ok(
@@ -475,6 +496,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("created privacy-safe epoch for {events} events and {checks} checks");
         }
+        "explain" => print!("{}\n", explain_epochs(&c)?),
         "note" => {
             let text = a.collect::<Vec<_>>().join(" ");
             if text.is_empty() {
@@ -517,7 +539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", record_check(&root, &c, code, &command)?);
         }
         _ => println!(
-            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | note <text> | status | resume | check <command>"
+            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
         ),
     };
     Ok(())
@@ -546,6 +568,19 @@ mod tests {
     #[test]
     fn default_ignores_secret_paths() {
         assert!(ignored(Path::new("."), "config/.env.local"));
+    }
+    #[test]
+    fn epochs_are_explainable_without_source_content() {
+        let c = Connection::open_in_memory().unwrap();
+        create_schema(&c).unwrap();
+        c.execute(
+            "INSERT INTO epochs(event_count,check_count,summary_hash) VALUES(3,2,?1)",
+            params![hash(b"safe aggregate")],
+        )
+        .unwrap();
+        let explanation = explain_epochs(&c).unwrap();
+        assert!(explanation.contains("events=3, checks=2"));
+        assert!(!explanation.contains("safe aggregate"));
     }
     #[test]
     fn changed_worktree_is_stale() {
