@@ -219,7 +219,6 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
         ) => {
             if provider == "codex"
                 && matches!(state, "awaiting_trust" | "ready")
-                && values.contains_key("hook_hash")
                 && !codex_hook_matches_manifest(root, &values)
             {
                 Ok("drifted".into())
@@ -264,7 +263,7 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} integration drifted");
         return Ok(());
     }
-    if !daemon_active(root) && start_daemon(root).is_err() {
+    if !daemon_active(root) {
         println!("Relay unavailable: {provider} local evidence unavailable");
         return Ok(());
     }
@@ -299,11 +298,11 @@ fn json_escape(value: &str) -> String {
 fn codex_hook_config(_root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let executable = env::current_exe()?.to_string_lossy().into_owned();
     let command = format!(
-        "{} integration hook-output codex",
+        "{} integration codex hook-output",
         systemd_quote(&executable)
     );
     Ok(format!(
-        "{{\n  \"description\": \"Relay-owned bounded continuity context for this repository.\",\n  \"hooks\": {{\n    \"SessionStart\": [{{\n      \"matcher\": \"^(startup|resume|compact)$\",\n      \"hooks\": [{{\n        \"type\": \"command\",\n        \"command\": \"{}\",\n        \"statusMessage\": \"Loading Relay continuity context\",\n        \"timeout\": 5,\n        \"additionalContextLimit\": 320\n      }}]\n    }}]\n  }}\n}}\n",
+        "{{\n  \"description\": \"Relay-owned bounded continuity context for this repository.\",\n  \"hooks\": {{\n    \"SessionStart\": [{{\n      \"matcher\": \"^(startup|resume)$\",\n      \"hooks\": [{{\n        \"type\": \"command\",\n        \"command\": \"{}\",\n        \"statusMessage\": \"Loading Relay continuity context\",\n        \"timeout\": 5,\n        \"additionalContextLimit\": 320\n      }}]\n    }}]\n  }}\n}}\n",
         json_escape(&command)
     )
     .into_bytes())
@@ -374,8 +373,9 @@ fn codex_hook_output(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if compact.len() > 4096
         || !compact.contains("\"hook_event_name\":\"SessionStart\"")
         || !(compact.contains("\"source\":\"startup\"")
-            || compact.contains("\"source\":\"resume\"")
-            || compact.contains("\"source\":\"compact\""))
+            || compact.contains("\"source\":\"resume\""))
+        || compact.contains("\"agent_id\":")
+        || compact.contains("\"agent_type\":")
     {
         println!("Relay unavailable: codex hook payload rejected");
         return Ok(());
@@ -440,6 +440,12 @@ fn service_user_path(root: &Path, kind: &str) -> Result<PathBuf, Box<dyn std::er
 }
 fn install_service_template(root: &Path, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
     let destination = service_user_path(root, kind)?;
+    match service_template_state(root, kind)? {
+        "installed" => return Ok(()),
+        "drifted" => return Err("Relay service template drifted; no file was changed".into()),
+        "not-installed" => {}
+        _ => unreachable!(),
+    }
     fs::create_dir_all(
         destination
             .parent()
@@ -587,6 +593,9 @@ fn integration_command(
                     "usage: relay integration initialize <codex|claude|grok> --apply".into(),
                 );
             }
+            if provider == "codex" {
+                return Err("use `relay integration codex install --apply` for the Codex trust gate".into());
+            }
             fs::create_dir_all(integration_dir(root))?;
             let owned = format!(
                 "version=1\nprovider={provider}\nstate=unavailable\nreason=capability-probe-required\n"
@@ -712,6 +721,17 @@ fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Relay requires a Git worktree; no evidence was written".into());
     }
     Ok(())
+}
+fn git_root(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    ensure_git(root)?;
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        return Err("Relay requires a Git worktree; no evidence was written".into());
+    }
+    Ok(fs::canonicalize(String::from_utf8(output.stdout)?.trim())?)
 }
 fn create_schema(c: &Connection) -> rusqlite::Result<()> {
     c.execute_batch(
@@ -1284,8 +1304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         return Ok(());
     }
-    let root = env::current_dir()?;
-    ensure_git(&root)?;
+    let root = git_root(&env::current_dir()?)?;
     if cmd == "integration" {
         return integration_command(&root, a);
     }
@@ -1493,13 +1512,16 @@ mod tests {
         atomic_replace(&config, b"foreign_token = 'sk-foreign-secret'\n").unwrap();
         write_integration_manifest(
             &root,
-            "codex",
+            "claude",
             "awaiting_trust",
             &fs::read(&config).unwrap(),
         )
         .unwrap();
-        let manifest = fs::read_to_string(integration_manifest_path(&root, "codex")).unwrap();
-        assert_eq!(integration_state(&root, "codex").unwrap(), "awaiting_trust");
+        let manifest = fs::read_to_string(integration_manifest_path(&root, "claude")).unwrap();
+        assert_eq!(
+            integration_state(&root, "claude").unwrap(),
+            "awaiting_trust"
+        );
         assert!(!manifest.contains("sk-foreign-secret"));
         assert!(manifest.contains("config_hash="));
         assert_eq!(

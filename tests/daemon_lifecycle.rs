@@ -15,6 +15,13 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
         .output()
         .expect("run relay")
 }
+fn run_from(cwd: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run relay from nested directory")
+}
 fn run_with_home(root: &Path, args: &[&str], home: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
@@ -39,6 +46,24 @@ fn run_with_input(root: &Path, args: &[&str], input: &str) -> std::process::Outp
         .write_all(input.as_bytes())
         .expect("write hook input");
     child.wait_with_output().expect("read relay output")
+}
+fn run_shell_with_input(root: &Path, command: &str, input: &str) -> std::process::Output {
+    let mut child = Command::new("sh")
+        .args(["-c", command])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start generated hook command");
+    child
+        .stdin
+        .take()
+        .expect("generated hook stdin")
+        .write_all(input.as_bytes())
+        .expect("write generated hook input");
+    child
+        .wait_with_output()
+        .expect("read generated hook output")
 }
 
 fn git_fixture(label: &str) -> PathBuf {
@@ -104,6 +129,21 @@ fn help_runs_without_creating_evidence_outside_a_git_worktree() {
 }
 
 #[test]
+fn nested_invocation_uses_the_canonical_git_root() {
+    let root = git_fixture("canonical-root-test");
+    let nested = root.join("nested/work");
+    fs::create_dir_all(&nested).expect("create nested directory");
+    let initialized = run_from(&nested, &["init"]);
+    assert!(initialized.status.success());
+    assert!(root.join(".relay/evidence.sqlite").exists());
+    assert!(!nested.join(".relay").exists());
+    assert!(run_from(&nested, &["daemon", "start"]).status.success());
+    assert!(run(&root, &["daemon", "status"]).status.success());
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_owned_state() {
     let root = git_fixture("integration-contract-test");
     let config = root.join("foreign-settings.toml");
@@ -127,26 +167,27 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
     assert!(!missing_apply.status.success());
     assert!(!root.join(".relay").exists());
 
-    let initialized = run(&root, &["integration", "initialize", "codex", "--apply"]);
+    let initialized = run(&root, &["integration", "initialize", "claude", "--apply"]);
     assert!(initialized.status.success());
-    let state = run(&root, &["integration", "status", "codex"]);
+    let state = run(&root, &["integration", "status", "claude"]);
     assert!(state.status.success());
-    assert!(String::from_utf8_lossy(&state.stdout).contains("codex: unavailable"));
+    assert!(String::from_utf8_lossy(&state.stdout).contains("claude: unavailable"));
     let relay_bytes =
-        fs::read(root.join(".relay/integrations/codex.state")).expect("read integration manifest");
+        fs::read(root.join(".relay/integrations/claude.state")).expect("read integration manifest");
     assert!(!String::from_utf8_lossy(&relay_bytes).contains(secret));
     assert_eq!(
         fs::read_to_string(&config).expect("re-read foreign config"),
         format!("token = '{secret}'\nformatting = ' keep exact spacing '\n")
     );
-    let manifest_path = root.join(".relay/integrations/codex.state");
+    let manifest_path = root.join(".relay/integrations/claude.state");
     let manifest = fs::read_to_string(&manifest_path).expect("read manifest");
     fs::write(
         &manifest_path,
         manifest.replace("state=unavailable", "state=ready"),
     )
     .expect("mark disposable adapter ready");
-    let emitted = run(&root, &["integration", "emit", "codex"]);
+    assert!(run(&root, &["daemon", "start"]).status.success());
+    let emitted = run(&root, &["integration", "emit", "claude"]);
     assert!(emitted.status.success());
     assert!(String::from_utf8_lossy(&emitted.stdout).contains("# Relay context"));
     assert!(!String::from_utf8_lossy(&emitted.stdout).contains(secret));
@@ -174,12 +215,29 @@ fn codex_hook_is_main_session_only_and_refuses_foreign_or_drifted_config() {
     let plan = run(&root, &["integration", "codex", "plan"]);
     assert!(plan.status.success());
     assert!(!root.join(".codex").exists());
+    assert!(
+        !run(&root, &["integration", "initialize", "codex", "--apply"])
+            .status
+            .success()
+    );
+    assert!(!root.join(".relay").exists());
     let installed = run(&root, &["integration", "codex", "install", "--apply"]);
     assert!(installed.status.success());
     let hook = fs::read_to_string(root.join(".codex/hooks.json")).expect("read Relay hook");
     assert!(hook.contains("\"SessionStart\""));
     assert!(!hook.contains("SubagentStart"));
     assert!(hook.contains("\"additionalContextLimit\": 320"));
+    assert!(hook.contains("integration codex hook-output"));
+    let command = hook
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("\"command\": \"")
+                .and_then(|value| value.strip_suffix("\","))
+        })
+        .expect("generated hook command")
+        .replace("\\\"", "\"")
+        .replace("\\\\", "\\");
     assert!(
         String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
             .contains("codex: awaiting_trust")
@@ -196,9 +254,10 @@ fn codex_hook_is_main_session_only_and_refuses_foreign_or_drifted_config() {
             .status
             .success()
     );
-    let emitted = run_with_input(
+    assert!(run(&root, &["daemon", "start"]).status.success());
+    let emitted = run_shell_with_input(
         &root,
-        &["integration", "codex", "hook-output"],
+        &command,
         "{\"hook_event_name\":\"SessionStart\",\"source\":\"resume\"}",
     );
     assert!(emitted.status.success());
@@ -252,6 +311,18 @@ fn service_install_writes_only_an_explicit_user_template() {
     );
     assert!(status.status.success());
     assert!(String::from_utf8_lossy(&status.stdout).contains("systemd: installed"));
+    fs::write(service.path(), "foreign service template\n").expect("drift service template");
+    let reinstall = run_with_home(
+        &root,
+        &["integration", "service", "install", "systemd", "--apply"],
+        &home,
+    );
+    assert!(!reinstall.status.success());
+    assert_eq!(
+        fs::read_to_string(service.path()).expect("retain drifted service template"),
+        "foreign service template\n"
+    );
+    fs::write(service.path(), &body).expect("restore Relay service template");
     let removed = run_with_home(
         &root,
         &["integration", "service", "uninstall", "systemd", "--apply"],
