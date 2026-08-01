@@ -585,7 +585,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
             params![now],
             |r| r.get(0),
         )
-        .ok();
+        .optional()?;
     let broken = latest_check.is_some_and(|exit_code| exit_code != 0);
     let prior: i64 = c.query_row(
         "SELECT COUNT(*) FROM assertions WHERE snapshot != ?1",
