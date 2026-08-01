@@ -231,6 +231,91 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
     print!("{}", bounded_context(&card(root, &c)?, 320));
     Ok(())
 }
+fn service_kind_is_valid(kind: &str) -> bool {
+    matches!(kind, "launchd" | "systemd")
+}
+fn service_id(root: &Path) -> String {
+    format!("relay-{}", &hash(root.to_string_lossy().as_bytes())[..12])
+}
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+fn systemd_quote(value: &str) -> String {
+    format!(
+        r#""{}""#,
+        value.replace(char::from(92), r"\\").replace('"', r#"\""#)
+    )
+}
+fn service_template(root: &Path, kind: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if !service_kind_is_valid(kind) {
+        return Err("Relay rejected an unsupported service manager".into());
+    }
+    let executable = env::current_exe()?.to_string_lossy().into_owned();
+    let working_directory = root.to_string_lossy();
+    let label = service_id(root);
+    Ok(match kind {
+        "launchd" => format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>integration</string><string>service</string><string>run</string></array>\n<key>WorkingDirectory</key><string>{}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
+            xml_escape(&label),
+            xml_escape(&executable),
+            xml_escape(&working_directory)
+        ),
+        "systemd" => format!(
+            "[Unit]\nDescription=Relay local evidence daemon ({label})\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} integration service run\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
+            systemd_quote(&working_directory),
+            systemd_quote(&executable)
+        ),
+        _ => unreachable!(),
+    })
+}
+fn service_user_path(root: &Path, kind: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let home = env::var_os("HOME").ok_or("Relay requires HOME for user service installation")?;
+    let id = service_id(root);
+    Ok(match kind {
+        "launchd" => PathBuf::from(home)
+            .join("Library/LaunchAgents")
+            .join(format!("{id}.plist")),
+        "systemd" => env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(home).join(".config"))
+            .join("systemd/user")
+            .join(format!("{id}.service")),
+        _ => return Err("Relay rejected an unsupported service manager".into()),
+    })
+}
+fn install_service_template(root: &Path, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let destination = service_user_path(root, kind)?;
+    fs::create_dir_all(
+        destination
+            .parent()
+            .ok_or("Relay service path has no parent")?,
+    )?;
+    atomic_replace(&destination, service_template(root, kind)?.as_bytes())
+}
+fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if daemon_active(root) {
+        return Err("Relay daemon is already active; service will not duplicate it".into());
+    }
+    let _ = fs::remove_file(pid_path(root));
+    let _ = fs::remove_file(ready_path(root));
+    let _ = fs::remove_file(stop_path(root));
+    let nonce = format!(
+        "service-{}",
+        &hash(format!("{}:{}", root.display(), std::process::id()).as_bytes())[..16]
+    );
+    let mut pid_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pid_path(root))?;
+    write!(pid_file, "{}\n{}", std::process::id(), nonce)?;
+    pid_file.sync_all()?;
+    let c = db(root)?;
+    run_daemon(root, &c, &nonce)
+}
 fn integration_command(
     root: &Path,
     mut args: impl Iterator<Item = String>,
@@ -301,8 +386,38 @@ fn integration_command(
             }
             integration_emit(root, &provider)
         }
+        Some("service") => match args.next().as_deref() {
+            Some("plan") => {
+                let kind = args
+                    .next()
+                    .ok_or("usage: relay integration service plan <launchd|systemd>")?;
+                if args.next().is_some() {
+                    return Err("usage: relay integration service plan <launchd|systemd>".into());
+                }
+                print!("{}", service_template(root, &kind)?);
+                Ok(())
+            }
+            Some("install") => {
+                let kind = args
+                    .next()
+                    .ok_or("usage: relay integration service install <launchd|systemd> --apply")?;
+                if args.next().as_deref() != Some("--apply") || args.next().is_some() {
+                    return Err(
+                        "usage: relay integration service install <launchd|systemd> --apply".into(),
+                    );
+                }
+                install_service_template(root, &kind)?;
+                println!("{kind}: user service template installed; enable it explicitly with your service manager");
+                Ok(())
+            }
+            Some("run") if args.next().is_none() => service_run(root),
+            _ => Err(
+                "usage: relay integration service <plan <manager>|install <manager> --apply|run>"
+                    .into(),
+            ),
+        },
         _ => Err(
-            "usage: relay integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>>"
+            "usage: relay integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...>"
                 .into(),
         ),
     }
@@ -1154,6 +1269,18 @@ mod tests {
             0
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn service_templates_are_root_scoped_and_escape_worktree_paths() {
+        let root = Path::new("/tmp/relay & <worktree>");
+        let launchd = service_template(root, "launchd").unwrap();
+        let systemd = service_template(root, "systemd").unwrap();
+        assert!(launchd.contains("relay-"));
+        assert!(launchd.contains("relay &amp; &lt;worktree&gt;"));
+        assert!(launchd.contains("integration</string><string>service</string><string>run"));
+        assert!(systemd.contains("WorkingDirectory=\"/tmp/relay & <worktree>\""));
+        assert!(systemd.contains("Restart=on-failure"));
+        assert!(service_template(root, "unsupported").is_err());
     }
     #[test]
     fn epochs_are_explainable_without_source_content() {
