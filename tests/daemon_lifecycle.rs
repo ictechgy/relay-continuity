@@ -14,6 +14,15 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
         .output()
         .expect("run relay")
 }
+fn run_with_home(root: &Path, args: &[&str], home: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(args)
+        .current_dir(root)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .output()
+        .expect("run relay with isolated home")
+}
 
 fn git_fixture(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -125,6 +134,47 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
     assert!(String::from_utf8_lossy(&emitted.stdout).contains("# Relay context"));
     assert!(!String::from_utf8_lossy(&emitted.stdout).contains(secret));
     assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn service_install_writes_only_an_explicit_user_template() {
+    let root = git_fixture("service-template-test");
+    let home = root.join("isolated-home");
+    fs::create_dir_all(&home).expect("create isolated home");
+    let preview = run_with_home(&root, &["integration", "service", "plan", "systemd"], &home);
+    assert!(preview.status.success());
+    assert!(!home.join(".config").exists());
+    let installed = run_with_home(
+        &root,
+        &["integration", "service", "install", "systemd", "--apply"],
+        &home,
+    );
+    assert!(installed.status.success());
+    let service_dir = home.join(".config/systemd/user");
+    let service = fs::read_dir(service_dir)
+        .expect("read service dir")
+        .flatten()
+        .next()
+        .expect("service artifact");
+    let body = fs::read_to_string(service.path()).expect("read service template");
+    assert!(body.contains("integration service run"));
+    assert!(body.contains("Restart=on-failure"));
+    assert!(!body.contains("ghp_"));
+    let status = run_with_home(
+        &root,
+        &["integration", "service", "status", "systemd"],
+        &home,
+    );
+    assert!(status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("systemd: installed"));
+    let removed = run_with_home(
+        &root,
+        &["integration", "service", "uninstall", "systemd", "--apply"],
+        &home,
+    );
+    assert!(removed.status.success());
+    assert!(!service.path().exists());
     fs::remove_dir_all(root).expect("remove fixture");
 }
 

@@ -259,7 +259,7 @@ fn service_template(root: &Path, kind: &str) -> Result<String, Box<dyn std::erro
     let label = service_id(root);
     Ok(match kind {
         "launchd" => format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>integration</string><string>service</string><string>run</string></array>\n<key>WorkingDirectory</key><string>{}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n</dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{}</string>\n<key>ProgramArguments</key><array><string>{}</string><string>integration</string><string>service</string><string>run</string></array>\n<key>WorkingDirectory</key><string>{}</string>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n</dict></plist>\n",
             xml_escape(&label),
             xml_escape(&executable),
             xml_escape(&working_directory)
@@ -296,9 +296,33 @@ fn install_service_template(root: &Path, kind: &str) -> Result<(), Box<dyn std::
     )?;
     atomic_replace(&destination, service_template(root, kind)?.as_bytes())
 }
+fn service_template_state(
+    root: &Path,
+    kind: &str,
+) -> Result<&'static str, Box<dyn std::error::Error>> {
+    let destination = service_user_path(root, kind)?;
+    match fs::read(&destination) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("not-installed"),
+        Err(error) => Err(error.into()),
+        Ok(current) if current == service_template(root, kind)?.as_bytes() => Ok("installed"),
+        Ok(_) => Ok("drifted"),
+    }
+}
+fn uninstall_service_template(root: &Path, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let destination = service_user_path(root, kind)?;
+    match service_template_state(root, kind)? {
+        "not-installed" => Ok(()),
+        "installed" => {
+            fs::remove_file(destination)?;
+            Ok(())
+        }
+        "drifted" => Err("Relay service template drifted; no file was removed".into()),
+        _ => unreachable!(),
+    }
+}
 fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if daemon_active(root) {
-        return Err("Relay daemon is already active; service will not duplicate it".into());
+        return Ok(());
     }
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
@@ -410,9 +434,35 @@ fn integration_command(
                 println!("{kind}: user service template installed; enable it explicitly with your service manager");
                 Ok(())
             }
+            Some("status") => {
+                let kind = args
+                    .next()
+                    .ok_or("usage: relay integration service status <launchd|systemd>")?;
+                if args.next().is_some() {
+                    return Err(
+                        "usage: relay integration service status <launchd|systemd>".into(),
+                    );
+                }
+                println!("{kind}: {}", service_template_state(root, &kind)?);
+                Ok(())
+            }
+            Some("uninstall") => {
+                let kind = args
+                    .next()
+                    .ok_or("usage: relay integration service uninstall <launchd|systemd> --apply")?;
+                if args.next().as_deref() != Some("--apply") || args.next().is_some() {
+                    return Err(
+                        "usage: relay integration service uninstall <launchd|systemd> --apply"
+                            .into(),
+                    );
+                }
+                uninstall_service_template(root, &kind)?;
+                println!("{kind}: Relay user service template removed; disable it in your service manager if it is still loaded");
+                Ok(())
+            }
             Some("run") if args.next().is_none() => service_run(root),
             _ => Err(
-                "usage: relay integration service <plan <manager>|install <manager> --apply|run>"
+                "usage: relay integration service <plan <manager>|install <manager> --apply|status <manager>|uninstall <manager> --apply|run>"
                     .into(),
             ),
         },
@@ -1278,6 +1328,7 @@ mod tests {
         assert!(launchd.contains("relay-"));
         assert!(launchd.contains("relay &amp; &lt;worktree&gt;"));
         assert!(launchd.contains("integration</string><string>service</string><string>run"));
+        assert!(launchd.contains("<key>SuccessfulExit</key><false/>"));
         assert!(systemd.contains("WorkingDirectory=\"/tmp/relay & <worktree>\""));
         assert!(systemd.contains("Restart=on-failure"));
         assert!(service_template(root, "unsupported").is_err());
