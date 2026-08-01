@@ -1,0 +1,30 @@
+{
+  "status": "RALPLAN_CONSENSUS_COMPLETE",
+  "strictConsensusAvailable": true,
+  "spawnMode": "role-selectable-native",
+  "selectedSelectorField": "agent_type",
+  "taskNameIsRoleSelector": false,
+  "agentDefinitionBackedFallback": false,
+  "planningArtifacts": {
+    "context": ".omx/context/relay-auto-integration-20260801T110348Z.md",
+    "plan": ".omx/plans/relay-auto-integration-v02-20260801T110348Z.md"
+  },
+  "independentLanes": true,
+  "sequentialOrder": ["architect", "critic"],
+  "surrogateReviewsUsed": false,
+  "architectReview": {
+    "initialVerdict": "ITERATE",
+    "recheckVerdict": "APPROVE",
+    "requiredRevision": "forbid persistent copies of user-owned provider configuration; use in-memory patching, same-directory atomic replacement, drift refusal, and secret-like foreign-config retention tests",
+    "result": "plan revised and approved"
+  },
+  "criticReview": {
+    "verdict": "APPROVE",
+    "result": "acceptance criteria, risks, alternatives, and deliberate test plan are executable"
+  },
+  "ralplanConsensusGate": {
+    "complete": true,
+    "reason": "Architect approved the revised plan and Critic approved it sequentially"
+  },
+  "executionBoundary": "No implementation in this planning run. Explicit user approval is required before $ultragoal, $team, or an explicit $ralph fallback."
+}
