@@ -97,15 +97,46 @@ fn dirty(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
         .collect::<Vec<_>>()
         .join("\n"))
 }
+struct RepositoryState {
+    head: String,
+    branch: String,
+    dirty: String,
+}
+fn repository_state(root: &Path) -> Result<RepositoryState, Box<dyn std::error::Error>> {
+    Ok(RepositoryState {
+        head: git(root, &["rev-parse", "HEAD"])?,
+        branch: git(root, &["branch", "--show-current"])?,
+        dirty: dirty(root)?,
+    })
+}
+fn state_detail(state: &RepositoryState) -> String {
+    format!(
+        "head#{} branch#{} dirty#{}",
+        &hash(state.head.as_bytes())[..12],
+        &hash(state.branch.as_bytes())[..12],
+        &hash(state.dirty.as_bytes())[..12]
+    )
+}
+fn detail_token<'a>(detail: &'a str, name: &str) -> Option<&'a str> {
+    detail
+        .split_whitespace()
+        .find_map(|token| token.strip_prefix(name))
+}
+fn event_kind(previous: &str, current: &str) -> &'static str {
+    if previous.is_empty() {
+        "repository-binding"
+    } else if detail_token(previous, "head#") != detail_token(current, "head#") {
+        "head-change"
+    } else if detail_token(previous, "branch#") != detail_token(current, "branch#") {
+        "branch-change"
+    } else {
+        "dirty-set"
+    }
+}
 fn snapshot(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let state = repository_state(root)?;
     Ok(hash(
-        format!(
-            "{}\n{}\n{}",
-            git(root, &["rev-parse", "HEAD"])?,
-            git(root, &["branch", "--show-current"])?,
-            dirty(root)?
-        )
-        .as_bytes(),
+        format!("{}\n{}\n{}", state.head, state.branch, state.dirty).as_bytes(),
     ))
 }
 fn safe_command(command: &str) -> String {
@@ -143,18 +174,20 @@ fn ignored(root: &Path, path: &str) -> bool {
         .any(|p| path.contains(p))
 }
 fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Error>> {
-    let s = snapshot(root)?;
-    let last: String = c
+    let state = repository_state(root)?;
+    let s = hash(format!("{}\n{}\n{}", state.head, state.branch, state.dirty).as_bytes());
+    let detail = state_detail(&state);
+    let last: (String, String) = c
         .query_row(
-            "SELECT snapshot FROM events ORDER BY id DESC LIMIT 1",
+            "SELECT snapshot,detail FROM events WHERE kind IN ('repository-binding','head-change','branch-change','dirty-set') ORDER BY id DESC LIMIT 1",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .unwrap_or_default();
-    if last != s {
+    if last.0 != s {
         c.execute(
-            "INSERT INTO events(kind,snapshot,detail) VALUES('dirty-set',?1,?2)",
-            params![s, hash(dirty(root)?.as_bytes())],
+            "INSERT INTO events(kind,snapshot,detail) VALUES(?1,?2,?3)",
+            params![event_kind(&last.1, &detail), s, detail],
         )?;
         return Ok(true);
     }
@@ -442,10 +475,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c = db(&root)?;
     match cmd.as_str() {
         "init" => {
-            let s = snapshot(&root)?;
+            let state = repository_state(&root)?;
+            let s = hash(format!("{}\n{}\n{}", state.head, state.branch, state.dirty).as_bytes());
             c.execute(
-                "INSERT INTO events(kind,snapshot,detail) VALUES('init',?1,'local-only')",
-                params![s],
+                "INSERT INTO events(kind,snapshot,detail) VALUES('repository-binding',?1,?2)",
+                params![s, state_detail(&state)],
             )?;
             fs::write(
                 relay_dir(&root).join(".gitignore"),
@@ -581,6 +615,14 @@ mod tests {
         let explanation = explain_epochs(&c).unwrap();
         assert!(explanation.contains("events=3, checks=2"));
         assert!(!explanation.contains("safe aggregate"));
+    }
+    #[test]
+    fn event_taxonomy_distinguishes_head_branch_and_dirty_changes() {
+        let base = "head#a branch#b dirty#c";
+        assert_eq!(event_kind("", base), "repository-binding");
+        assert_eq!(event_kind(base, "head#x branch#b dirty#c"), "head-change");
+        assert_eq!(event_kind(base, "head#a branch#x dirty#c"), "branch-change");
+        assert_eq!(event_kind(base, "head#a branch#b dirty#x"), "dirty-set");
     }
     #[test]
     fn changed_worktree_is_stale() {
