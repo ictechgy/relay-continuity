@@ -5,8 +5,8 @@ It records Git snapshots and explicit check outcomes locally, then renders a sma
 resume card. It does not store source bodies, raw diffs, chats, telemetry, or
 raw command output.
 
-> v0.1 is under active development. It is not a transcript recovery tool and
-> cannot universally observe an AI tool's quota or internal reasoning.
+> v0.2 is under active development. It is not a transcript recovery tool and
+> cannot universally observe an AI tool's quota, internal reasoning, or UI.
 
 ## Trust model
 
@@ -49,12 +49,12 @@ source, diffs, outputs, or annotations.
 
 ## Provider capability matrix
 
-| Capability | Relay v0.1 |
+| Capability | Relay v0.2 |
 | --- | --- |
 | Git/filesystem/check evidence | Supported without a provider adapter |
 | Codex, Claude, Grok, or other AI chat state | Not captured |
 | GUI context injection or quota-end detection | Unsupported |
-| Provider adapters | Optional typed metadata from `codex`, `claude`, and `grok`; generic core remains available |
+| Provider adapters | Codex session-start hook only after explicit project trust; Claude/Grok remain capability-gated and generic core remains available |
 
 `relay adapter <provider> <metadata-type>` accepts only a short ASCII metadata
 type from `codex`, `claude`, or `grok`, then stores a hash rather than the value.
@@ -62,3 +62,78 @@ Malformed or unsupported input is rejected before it can enter the core
 database, and adapter metadata cannot write cards or prove an assertion.
 
 Relay carries observable work evidence, not a complete AI thought process.
+
+## Automatic session-start integration (v0.2)
+
+Relay has two separate opt-ins. They are one-time setup operations, not skills
+that an agent must remember to invoke on every session:
+
+1. A repository-scoped user service keeps local Git evidence current.
+2. A trusted provider hook asks Relay for one bounded resume card at a main
+   session start or resume.
+
+Both operations are previewable, use an explicit `--apply`, and are
+deliberately scoped to the current Git root. Relay never starts another AI,
+reads a chat transcript, detects quotas, opens a browser, uploads evidence, or
+changes account settings.
+
+### Local capture service
+
+On macOS, preview then install the root-specific `launchd` template:
+
+```sh
+relay integration service plan launchd
+relay integration service install launchd --apply
+```
+
+On Linux, use `systemd --user` instead:
+
+```sh
+relay integration service plan systemd
+relay integration service install systemd --apply
+```
+
+Installation writes only a new Relay-owned template under the invoking user's
+service directory. Enable that template once with the platform's service
+manager; Relay intentionally does not enable a background process without that
+separate user action. `relay integration service status <manager>` detects a
+missing or modified template, and `uninstall <manager> --apply` removes only a
+byte-identical Relay template. `relay daemon stop` is a nonce-checked controlled
+stop; the templates restart only after unsuccessful exits.
+
+### Codex
+
+The Codex adapter is the supported automatic injection path. It installs a
+fully Relay-owned project `.codex/hooks.json` only when that file does not
+already exist:
+
+```sh
+relay integration codex plan
+relay integration codex install --apply
+# In Codex, review and trust the exact project hook with /hooks.
+relay integration codex trust --apply
+```
+
+The hook is `SessionStart` only, matches `startup`, `resume`, and `compact`,
+and caps model-visible added context at 320 tokens. It never registers a
+`SubagentStart` hook. Hook stdin is bounded and validated in memory; no session
+id, prompt, transcript path, or hook payload is retained. If `.codex/hooks.json`
+is present but not byte-identical to Relay's dedicated file, Relay refuses to
+alter it. If its owned file later drifts, status becomes `drifted` and uninstall
+refuses to remove it.
+
+### Claude and Grok
+
+Relay probes providers before enabling them. This checkout's Claude CLI is
+present but currently reports unauthenticated, so its runtime hook contract is
+intentionally `unavailable`. Grok Build's installed documentation explicitly
+states that stdout from passive `SessionStart` hooks is ignored; therefore it
+cannot safely provide an automatic model-context card through that hook. Relay
+keeps both adapters unavailable instead of pretending that a hook which only
+runs local code injected context. The generic evidence core and `relay resume`
+continue to work without either adapter.
+
+Use `relay integration status` to inspect `disabled`, `awaiting_trust`,
+`ready`, `unavailable`, `drifted`, or `broken`. These states are local,
+hash-based control records; they are not a claim that Relay can transfer a
+provider's hidden session or take over after a quota limit.
