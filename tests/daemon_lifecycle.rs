@@ -218,6 +218,18 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .contains("top-secret")
     );
     drop(database);
+    let note = run(&root, &["note", "operator-secret-should-never-persist"]);
+    assert!(note.status.success());
+    let database_bytes =
+        fs::read(root.join(".relay/evidence.sqlite")).expect("read evidence bytes");
+    assert!(
+        !String::from_utf8_lossy(&database_bytes).contains("operator-secret-should-never-persist")
+    );
+    assert!(
+        !fs::read_to_string(root.join(".relay/current.md"))
+            .expect("read note card")
+            .contains("operator-secret-should-never-persist")
+    );
     let hook = run(&root, &["shell", "zsh"]);
     assert!(hook.status.success());
     assert!(String::from_utf8_lossy(&hook.stdout).contains("record-check"));
