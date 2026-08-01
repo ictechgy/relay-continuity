@@ -183,6 +183,15 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
     let manifest = fs::read_to_string(&manifest_path).expect("read manifest");
     fs::write(
         &manifest_path,
+        manifest.replace("root_hash=", "root_hash=drifted"),
+    )
+    .expect("drift manifest root");
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "claude"]).stdout)
+            .contains("claude: drifted")
+    );
+    fs::write(
+        &manifest_path,
         manifest.replace("state=unavailable", "state=ready"),
     )
     .expect("mark disposable adapter ready");
@@ -210,6 +219,27 @@ fn codex_hook_is_main_session_only_and_refuses_foreign_or_drifted_config() {
     );
     assert!(!foreign_root.join(".relay").exists());
     fs::remove_dir_all(foreign_root).expect("remove foreign fixture");
+
+    let orphan_root = git_fixture("codex-hook-orphan-test");
+    assert!(
+        run(
+            &orphan_root,
+            &["integration", "codex", "install", "--apply"]
+        )
+        .status
+        .success()
+    );
+    fs::remove_dir_all(orphan_root.join(".relay")).expect("remove Relay ownership record");
+    assert!(
+        !run(
+            &orphan_root,
+            &["integration", "codex", "install", "--apply"]
+        )
+        .status
+        .success()
+    );
+    assert!(orphan_root.join(".codex/hooks.json").exists());
+    fs::remove_dir_all(orphan_root).expect("remove orphan fixture");
 
     let root = git_fixture("codex-hook-test");
     let plan = run(&root, &["integration", "codex", "plan"]);

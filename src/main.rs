@@ -201,7 +201,9 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
     if !path.exists() {
         return Ok("disabled".into());
     }
-    let text = fs::read_to_string(path)?;
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok("broken".into());
+    };
     let values = text
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -217,6 +219,16 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
             state
             @ ("disabled" | "awaiting_trust" | "ready" | "unavailable" | "drifted" | "broken"),
         ) => {
+            if matches!(state, "drifted" | "broken") {
+                return Ok(state.into());
+            }
+            let root_hash = hash(root.to_string_lossy().as_bytes());
+            let owned_matches = fs::read(integration_owned_path(root, provider))
+                .map(|owned| values.get("config_hash") == Some(&hash(&owned)))
+                .unwrap_or(false);
+            if values.get("root_hash") != Some(&root_hash) || !owned_matches {
+                return Ok("drifted".into());
+            }
             if provider == "codex"
                 && matches!(state, "awaiting_trust" | "ready")
                 && !codex_hook_matches_manifest(root, &values)
@@ -254,9 +266,15 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} integration {state}");
         return Ok(());
     }
-    let manifest = integration_manifest_values(root, provider)?;
+    let Ok(manifest) = integration_manifest_values(root, provider) else {
+        println!("Relay unavailable: {provider} integration unavailable");
+        return Ok(());
+    };
     let root_hash = hash(root.to_string_lossy().as_bytes());
-    let owned = fs::read(integration_owned_path(root, provider))?;
+    let Ok(owned) = fs::read(integration_owned_path(root, provider)) else {
+        println!("Relay unavailable: {provider} integration unavailable");
+        return Ok(());
+    };
     if manifest.get("root_hash") != Some(&root_hash)
         || manifest.get("config_hash") != Some(&hash(&owned))
     {
@@ -323,14 +341,40 @@ fn codex_hook_preflight(root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Erro
         ),
     }
 }
+fn codex_owned_provenance(root: &Path, hook: &[u8]) -> bool {
+    let Ok(values) = integration_manifest_values(root, "codex") else {
+        return false;
+    };
+    let Some(state) = values.get("state") else {
+        return false;
+    };
+    if !matches!(state.as_str(), "awaiting_trust" | "ready")
+        || integration_state(root, "codex").ok().as_deref() != Some(state)
+        || !codex_hook_matches_manifest(root, &values)
+    {
+        return false;
+    }
+    fs::read(integration_owned_path(root, "codex"))
+        .map(|owned| owned == codex_owned_state(state, hook))
+        .unwrap_or(false)
+}
 fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let hook = codex_hook_preflight(root)?;
+    let hook = codex_hook_config(root)?;
     let hook_path = codex_hook_path(root);
+    match fs::read(&hook_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+        Ok(current) if current == hook && codex_owned_provenance(root, &hook) => return Ok(()),
+        Ok(_) => {
+            return Err(
+                "Relay refuses to adopt or overwrite an existing Codex hooks.json; no file was changed"
+                    .into(),
+            );
+        }
+    }
     fs::create_dir_all(hook_path.parent().ok_or("Codex hook path has no parent")?)?;
     fs::create_dir_all(integration_dir(root))?;
-    if !hook_path.exists() {
-        atomic_replace(&hook_path, &hook)?;
-    }
+    atomic_replace(&hook_path, &hook)?;
     let owned = codex_owned_state("awaiting_trust", &hook);
     atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
     write_codex_manifest(root, "awaiting_trust", &owned, &hook)
@@ -352,8 +396,8 @@ fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn codex_uninstall(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_preflight(root)?;
     let hook_path = codex_hook_path(root);
-    if !hook_path.exists() {
-        return Err("Relay Codex hook is not installed; no file was removed".into());
+    if !codex_owned_provenance(root, &hook) {
+        return Err("Relay Codex hook ownership is unproven; no file was removed".into());
     }
     fs::remove_file(&hook_path)?;
     let owned = codex_owned_state("disabled", &hook);
@@ -1510,13 +1554,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let config = root.join("settings.toml");
         atomic_replace(&config, b"foreign_token = 'sk-foreign-secret'\n").unwrap();
-        write_integration_manifest(
-            &root,
-            "claude",
-            "awaiting_trust",
-            &fs::read(&config).unwrap(),
-        )
-        .unwrap();
+        fs::create_dir_all(integration_dir(&root)).unwrap();
+        let owned = b"version=1\nprovider=claude\nstate=awaiting_trust\n";
+        atomic_replace(&integration_owned_path(&root, "claude"), owned).unwrap();
+        write_integration_manifest(&root, "claude", "awaiting_trust", owned).unwrap();
         let manifest = fs::read_to_string(integration_manifest_path(&root, "claude")).unwrap();
         assert_eq!(
             integration_state(&root, "claude").unwrap(),
