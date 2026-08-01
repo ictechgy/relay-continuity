@@ -24,6 +24,29 @@ fn pid_path(root: &Path) -> PathBuf {
 fn ready_path(root: &Path) -> PathBuf {
     relay_dir(root).join("daemon.ready")
 }
+fn writer_lock_path(root: &Path) -> PathBuf {
+    relay_dir(root).join("writer.lock")
+}
+struct WriterLock(PathBuf);
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
+    let path = writer_lock_path(root);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            write!(file, "{}", std::process::id())?;
+            file.sync_all()?;
+            Ok(WriterLock(path))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err("Relay writer is busy; retry without modifying evidence".into())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
 fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let ok = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -174,6 +197,7 @@ fn ignored(root: &Path, path: &str) -> bool {
         .any(|p| path.contains(p))
 }
 fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Error>> {
+    let _lock = writer_lock(root)?;
     let state = repository_state(root)?;
     let s = hash(format!("{}\n{}\n{}", state.head, state.branch, state.dirty).as_bytes());
     let detail = state_detail(&state);
@@ -339,6 +363,7 @@ fn record_check(
     code: i32,
     command: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let _lock = writer_lock(root)?;
     let s = snapshot(root)?;
     let label = safe_command(command);
     c.execute(
@@ -475,6 +500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c = db(&root)?;
     match cmd.as_str() {
         "init" => {
+            let _lock = writer_lock(&root)?;
             let state = repository_state(&root)?;
             let s = hash(format!("{}\n{}\n{}", state.head, state.branch, state.dirty).as_bytes());
             c.execute(
@@ -483,7 +509,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             fs::write(
                 relay_dir(&root).join(".gitignore"),
-                "evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\n",
+                "evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\nwriter.lock\n",
             )?;
             let exclude = root.join(".git/info/exclude");
             let existing = fs::read_to_string(&exclude).unwrap_or_default();
@@ -521,6 +547,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         "shell" => print!("{}", shell_hook(a.next().as_deref().unwrap_or(""))?),
         "compact" => {
+            let _lock = writer_lock(&root)?;
             let events: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
             let checks: i64 = c.query_row("SELECT COUNT(*) FROM checks", [], |r| r.get(0))?;
             let summary = hash(format!("{events}:{checks}").as_bytes());
@@ -532,6 +559,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "explain" => print!("{}\n", explain_epochs(&c)?),
         "note" => {
+            let _lock = writer_lock(&root)?;
             let text = a.collect::<Vec<_>>().join(" ");
             if text.is_empty() {
                 return Err("usage: relay note <text>".into());
@@ -623,6 +651,23 @@ mod tests {
         assert_eq!(event_kind(base, "head#x branch#b dirty#c"), "head-change");
         assert_eq!(event_kind(base, "head#a branch#x dirty#c"), "branch-change");
         assert_eq!(event_kind(base, "head#a branch#b dirty#x"), "dirty-set");
+    }
+    #[test]
+    fn writer_lock_rejects_a_second_writer_without_removing_the_first_lock() {
+        let root = env::temp_dir().join(format!(
+            "relay-lock-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        let first = writer_lock(&root).unwrap();
+        assert!(writer_lock(&root).is_err());
+        assert!(writer_lock_path(&root).exists());
+        drop(first);
+        assert!(writer_lock(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn changed_worktree_is_stale() {
