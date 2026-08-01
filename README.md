@@ -18,6 +18,9 @@ raw command output.
 ## Development
 
 `cargo test` runs the local test suite. The project is local-only by design.
+Tags beginning with `v` build a macOS and Linux binary plus a SHA-256 checksum
+for each platform in GitHub Actions. A public release is intentionally deferred
+until a repository owner and release authority are selected.
 
 `relay init` creates local ignored state. `relay daemon start` runs a local
 filesystem watcher, debounces bursts for 750 ms, and records only a reconciled

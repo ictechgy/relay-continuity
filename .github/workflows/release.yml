@@ -4,15 +4,24 @@ on:
     tags: ['v*']
 jobs:
   archive:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: linux-x86_64
+          - os: macos-13
+            asset: macos-x86_64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked
-      - run: sha256sum target/release/relay > relay-linux-x86_64.sha256
+      - run: mv target/release/relay relay-${{ matrix.asset }}
+      - run: shasum -a 256 relay-${{ matrix.asset }} > relay-${{ matrix.asset }}.sha256
       - uses: actions/upload-artifact@v4
         with:
-          name: relay-linux-x86_64
+          name: relay-${{ matrix.asset }}
           path: |
-            target/release/relay
-            relay-linux-x86_64.sha256
+            relay-${{ matrix.asset }}
+            relay-${{ matrix.asset }}.sha256
