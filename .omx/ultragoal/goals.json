@@ -4,7 +4,7 @@
   "aggregateObjective": "Implement Relay v0.1 according to the approved plan and this durable ledger.",
   "goals": [
     {"id":"G001","title":"Bootstrap repository and evidence schema","status":"complete"},
-    {"id":"G002","title":"Implement snapshot, assertions, and deterministic card","status":"in_progress"},
-    {"id":"G003","title":"Verify, harden, package, and review","status":"pending"}
+    {"id":"G002","title":"Implement snapshot, assertions, and deterministic card","status":"complete"},
+    {"id":"G003","title":"Verify, harden, package, and review","status":"in_progress"}
   ]
 }
