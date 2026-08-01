@@ -1,8 +1,9 @@
 use rusqlite::Connection;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +23,22 @@ fn run_with_home(root: &Path, args: &[&str], home: &Path) -> std::process::Outpu
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .output()
         .expect("run relay with isolated home")
+}
+fn run_with_input(root: &Path, args: &[&str], input: &str) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(args)
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start relay with hook input");
+    child
+        .stdin
+        .take()
+        .expect("relay stdin")
+        .write_all(input.as_bytes())
+        .expect("write hook input");
+    child.wait_with_output().expect("read relay output")
 }
 
 fn git_fixture(label: &str) -> PathBuf {
@@ -133,6 +150,73 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
     assert!(emitted.status.success());
     assert!(String::from_utf8_lossy(&emitted.stdout).contains("# Relay context"));
     assert!(!String::from_utf8_lossy(&emitted.stdout).contains(secret));
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn codex_hook_is_main_session_only_and_refuses_foreign_or_drifted_config() {
+    let foreign_root = git_fixture("codex-hook-foreign-test");
+    let foreign_hook = foreign_root.join(".codex/hooks.json");
+    fs::create_dir_all(foreign_hook.parent().expect("hook parent")).expect("create hook parent");
+    fs::write(&foreign_hook, "{\"token\":\"ghp_foreign_hook_secret\"}\n")
+        .expect("write foreign hook");
+    let foreign_plan = run(&foreign_root, &["integration", "codex", "plan"]);
+    assert!(!foreign_plan.status.success());
+    assert_eq!(
+        fs::read_to_string(&foreign_hook).expect("read foreign hook"),
+        "{\"token\":\"ghp_foreign_hook_secret\"}\n"
+    );
+    assert!(!foreign_root.join(".relay").exists());
+    fs::remove_dir_all(foreign_root).expect("remove foreign fixture");
+
+    let root = git_fixture("codex-hook-test");
+    let plan = run(&root, &["integration", "codex", "plan"]);
+    assert!(plan.status.success());
+    assert!(!root.join(".codex").exists());
+    let installed = run(&root, &["integration", "codex", "install", "--apply"]);
+    assert!(installed.status.success());
+    let hook = fs::read_to_string(root.join(".codex/hooks.json")).expect("read Relay hook");
+    assert!(hook.contains("\"SessionStart\""));
+    assert!(!hook.contains("SubagentStart"));
+    assert!(hook.contains("\"additionalContextLimit\": 320"));
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
+            .contains("codex: awaiting_trust")
+    );
+    let before_trust = run_with_input(
+        &root,
+        &["integration", "codex", "hook-output"],
+        "{\"hook_event_name\":\"SessionStart\",\"source\":\"startup\"}",
+    );
+    assert!(before_trust.status.success());
+    assert!(String::from_utf8_lossy(&before_trust.stdout).contains("awaiting_trust"));
+    assert!(
+        run(&root, &["integration", "codex", "trust", "--apply"])
+            .status
+            .success()
+    );
+    let emitted = run_with_input(
+        &root,
+        &["integration", "codex", "hook-output"],
+        "{\"hook_event_name\":\"SessionStart\",\"source\":\"resume\"}",
+    );
+    assert!(emitted.status.success());
+    assert!(String::from_utf8_lossy(&emitted.stdout).contains("# Relay context"));
+    fs::write(root.join(".codex/hooks.json"), "{\"changed\":true}\n").expect("drift hook");
+    assert!(
+        String::from_utf8_lossy(&run(&root, &["integration", "status", "codex"]).stdout)
+            .contains("codex: drifted")
+    );
+    assert!(
+        !run(&root, &["integration", "codex", "uninstall", "--apply"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".codex/hooks.json")).expect("retain drifted hook"),
+        "{\"changed\":true}\n"
+    );
     assert!(run(&root, &["daemon", "stop"]).status.success());
     fs::remove_dir_all(root).expect("remove fixture");
 }

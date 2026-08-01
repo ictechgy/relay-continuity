@@ -39,6 +39,9 @@ fn integration_manifest_path(root: &Path, provider: &str) -> PathBuf {
 fn integration_owned_path(root: &Path, provider: &str) -> PathBuf {
     integration_dir(root).join(format!("{provider}.owned"))
 }
+fn codex_hook_path(root: &Path) -> PathBuf {
+    root.join(".codex/hooks.json")
+}
 fn integration_provider_is_valid(provider: &str) -> bool {
     matches!(provider, "codex" | "claude" | "grok")
 }
@@ -167,6 +170,29 @@ fn write_integration_manifest(
         manifest.as_bytes(),
     )
 }
+fn write_codex_manifest(
+    root: &Path,
+    state: &str,
+    owned_bytes: &[u8],
+    hook_bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_integration_manifest(root, "codex", state, owned_bytes)?;
+    let path = integration_manifest_path(root, "codex");
+    let mut manifest = fs::read_to_string(&path)?;
+    manifest.push_str(&format!("hook_hash={}\n", hash(hook_bytes)));
+    atomic_replace(&path, manifest.as_bytes())
+}
+fn codex_hook_matches_manifest(
+    root: &Path,
+    values: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let Some(expected) = values.get("hook_hash") else {
+        return false;
+    };
+    fs::read(codex_hook_path(root))
+        .map(|bytes| hash(&bytes) == *expected)
+        .unwrap_or(false)
+}
 fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std::error::Error>> {
     if !integration_provider_is_valid(provider) {
         return Err("Relay rejected an unsupported integration provider".into());
@@ -179,13 +205,27 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
     let values = text
         .lines()
         .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect::<std::collections::BTreeMap<_, _>>();
-    if values.get("version") != Some(&"1") || values.get("provider") != Some(&provider) {
+    if values.get("version").map(String::as_str) != Some("1")
+        || values.get("provider").map(String::as_str) != Some(provider)
+    {
         return Ok("broken".into());
     }
-    match values.get("state").copied() {
-        Some("disabled" | "awaiting_trust" | "ready" | "unavailable" | "drifted" | "broken") => {
-            Ok(values["state"].into())
+    match values.get("state").map(String::as_str) {
+        Some(
+            state
+            @ ("disabled" | "awaiting_trust" | "ready" | "unavailable" | "drifted" | "broken"),
+        ) => {
+            if provider == "codex"
+                && matches!(state, "awaiting_trust" | "ready")
+                && values.contains_key("hook_hash")
+                && !codex_hook_matches_manifest(root, &values)
+            {
+                Ok("drifted".into())
+            } else {
+                Ok(state.into())
+            }
         }
         _ => Ok("broken".into()),
     }
@@ -230,6 +270,109 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
     let c = db(root)?;
     print!("{}", bounded_context(&card(root, &c)?, 320));
     Ok(())
+}
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+fn codex_hook_config(_root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let executable = env::current_exe()?.to_string_lossy().into_owned();
+    let command = format!(
+        "{} integration hook-output codex",
+        systemd_quote(&executable)
+    );
+    Ok(format!(
+        "{{\n  \"description\": \"Relay-owned bounded continuity context for this repository.\",\n  \"hooks\": {{\n    \"SessionStart\": [{{\n      \"matcher\": \"^(startup|resume|compact)$\",\n      \"hooks\": [{{\n        \"type\": \"command\",\n        \"command\": \"{}\",\n        \"statusMessage\": \"Loading Relay continuity context\",\n        \"timeout\": 5,\n        \"additionalContextLimit\": 320\n      }}]\n    }}]\n  }}\n}}\n",
+        json_escape(&command)
+    )
+    .into_bytes())
+}
+fn codex_owned_state(state: &str, hook_bytes: &[u8]) -> Vec<u8> {
+    format!(
+        "version=1\nprovider=codex\nstate={state}\nhook_hash={}\n",
+        hash(hook_bytes)
+    )
+    .into_bytes()
+}
+fn codex_hook_preflight(root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let desired = codex_hook_config(root)?;
+    let path = codex_hook_path(root);
+    match fs::read(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(desired),
+        Err(error) => Err(error.into()),
+        Ok(current) if current == desired => Ok(desired),
+        Ok(_) => Err(
+            "Relay refuses to overwrite an existing Codex hooks.json; no file was changed".into(),
+        ),
+    }
+}
+fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let hook = codex_hook_preflight(root)?;
+    let hook_path = codex_hook_path(root);
+    fs::create_dir_all(hook_path.parent().ok_or("Codex hook path has no parent")?)?;
+    fs::create_dir_all(integration_dir(root))?;
+    if !hook_path.exists() {
+        atomic_replace(&hook_path, &hook)?;
+    }
+    let owned = codex_owned_state("awaiting_trust", &hook);
+    atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+    write_codex_manifest(root, "awaiting_trust", &owned, &hook)
+}
+fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let hook = codex_hook_preflight(root)?;
+    let values = integration_manifest_values(root, "codex")?;
+    if integration_state(root, "codex")? != "awaiting_trust"
+        || !codex_hook_matches_manifest(root, &values)
+    {
+        return Err(
+            "Relay Codex integration is not an unchanged awaiting-trust installation".into(),
+        );
+    }
+    let owned = codex_owned_state("ready", &hook);
+    atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+    write_codex_manifest(root, "ready", &owned, &hook)
+}
+fn codex_uninstall(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let hook = codex_hook_preflight(root)?;
+    let hook_path = codex_hook_path(root);
+    if !hook_path.exists() {
+        return Err("Relay Codex hook is not installed; no file was removed".into());
+    }
+    fs::remove_file(&hook_path)?;
+    let owned = codex_owned_state("disabled", &hook);
+    atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+    write_integration_manifest(root, "codex", "disabled", &owned)
+}
+fn codex_hook_output(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = Vec::new();
+    std::io::stdin().take(4097).read_to_end(&mut input)?;
+    let compact = String::from_utf8(input)?
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .collect::<String>();
+    if compact.len() > 4096
+        || !compact.contains("\"hook_event_name\":\"SessionStart\"")
+        || !(compact.contains("\"source\":\"startup\"")
+            || compact.contains("\"source\":\"resume\"")
+            || compact.contains("\"source\":\"compact\""))
+    {
+        println!("Relay unavailable: codex hook payload rejected");
+        return Ok(());
+    }
+    integration_emit(root, "codex")
 }
 fn service_kind_is_valid(kind: &str) -> bool {
     matches!(kind, "launchd" | "systemd")
@@ -345,6 +488,50 @@ fn integration_command(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.next().as_deref() {
+        Some("codex") => match args.next().as_deref() {
+            Some("plan") if args.next().is_none() => {
+                let hook = codex_hook_preflight(root)?;
+                println!(
+                    "codex: preview only; .codex/hooks.json#{}; no files changed",
+                    &hash(&hook)[..12]
+                );
+                Ok(())
+            }
+            Some("install") => {
+                if args.next().as_deref() != Some("--apply") || args.next().is_some() {
+                    return Err("usage: relay integration codex install --apply".into());
+                }
+                codex_install(root)?;
+                println!("codex: project hook installed as awaiting_trust; review and trust it with /hooks, then run `relay integration codex trust --apply`");
+                Ok(())
+            }
+            Some("trust") => {
+                if args.next().as_deref() != Some("--apply") || args.next().is_some() {
+                    return Err("usage: relay integration codex trust --apply".into());
+                }
+                codex_mark_trusted(root)?;
+                println!("codex: Relay marked ready after explicit user trust acknowledgement");
+                Ok(())
+            }
+            Some("uninstall") => {
+                if args.next().as_deref() != Some("--apply") || args.next().is_some() {
+                    return Err("usage: relay integration codex uninstall --apply".into());
+                }
+                codex_uninstall(root)?;
+                println!("codex: Relay-owned project hook removed");
+                Ok(())
+            }
+            Some("hook-output") => {
+                if args.next().is_some() {
+                    return Err("usage: relay integration codex hook-output".into());
+                }
+                codex_hook_output(root)
+            }
+            _ => Err(
+                "usage: relay integration codex <plan|install --apply|trust --apply|uninstall --apply|hook-output>"
+                    .into(),
+            ),
+        },
         Some("status") => {
             let providers = match args.next() {
                 Some(provider) => vec![provider],
@@ -467,7 +654,7 @@ fn integration_command(
             ),
         },
         _ => Err(
-            "usage: relay integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...>"
+            "usage: relay integration <codex ...|status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...>"
                 .into(),
         ),
     }
@@ -1088,7 +1275,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = a.next().unwrap_or_else(|| "help".into());
     if cmd == "help" {
         println!(
-            "relay init | integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
+            "relay init | integration <codex <plan|install --apply|trust --apply|uninstall --apply>|status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
         );
         return Ok(());
     }
@@ -1222,7 +1409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             print!("{}", record_check(&root, &c, code, &command)?);
         }
         _ => println!(
-            "relay init | integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | check <command>"
+            "relay init | integration <codex <plan|install --apply|trust --apply|uninstall --apply>|status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | check <command>"
         ),
     };
     Ok(())
