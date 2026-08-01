@@ -1,0 +1,3 @@
+# Paths matched here never appear in Relay's card.
+private-fixtures/
+customer-data/

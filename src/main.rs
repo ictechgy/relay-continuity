@@ -25,6 +25,10 @@ fn safe_path(path: &str) -> String {
     let lower=path.to_ascii_lowercase();
     if lower.contains(".env") || lower.contains("token") || lower.contains("secret") || lower.contains("key") { "[redacted-path]".into() } else { path.into() }
 }
+fn ignored(root: &Path, path: &str) -> bool {
+ let defaults=[".env", ".pem", "id_rsa", "target/"]; if defaults.iter().any(|p|path.contains(p)){return true}
+ fs::read_to_string(root.join(".relayignore")).unwrap_or_default().lines().map(str::trim).filter(|p|!p.is_empty()&&!p.starts_with('#')).any(|p|path.contains(p))
+}
 fn observe(root: &Path, c: &Connection) -> rusqlite::Result<bool> {
  let s=snapshot(root); let last:String=c.query_row("SELECT snapshot FROM events ORDER BY id DESC LIMIT 1",[],|r|r.get(0)).unwrap_or_default();
  if last!=s { c.execute("INSERT INTO events(kind,snapshot,detail) VALUES('dirty-set',?1,?2)",params![s,hash(dirty(root).as_bytes())])?; return Ok(true) } Ok(false)
@@ -33,7 +37,7 @@ fn card(root: &Path, c: &Connection) -> rusqlite::Result<String> {
  let now=snapshot(root); let last:String=c.query_row("SELECT snapshot FROM events ORDER BY id DESC LIMIT 1",[],|r|r.get(0)).unwrap_or_default();
  let state=if last.is_empty(){"UNKNOWN"}else if last==now{"FRESH"}else{"STALE"};
  let broken:i64=c.query_row("SELECT COUNT(*) FROM checks WHERE exit_code != 0 AND snapshot = ?1",params![now],|r|r.get(0))?;
- let changed=dirty(root).lines().filter_map(|l|l.split_whitespace().last()).map(safe_path).take(12).collect::<Vec<_>>().join(", ");
+ let changed=dirty(root).lines().filter_map(|l|l.split_whitespace().last()).filter(|p|!ignored(root,p)).map(safe_path).take(12).collect::<Vec<_>>().join(", ");
  let text=format!("# Relay context\n\nSTATUS: {state}\nSnapshot: {now}\nBranch: {}\nChanged: {}\nChecks: {}\n\n{}\n",safe_path(&git(root,&["branch","--show-current"])),if changed.is_empty(){"none"}else{&changed},if broken>0{"BROKEN evidence exists"}else{"No broken recorded checks"},if state=="STALE"{"Prior assertions are not verified; re-run relevant checks."}else{"Evidence is snapshot-bound; intent remains unknown unless annotated."});
  fs::write(relay_dir(root).join("current.md"),&text).expect("write card"); Ok(text)
 }
@@ -50,4 +54,4 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
  }; Ok(())
 }
 
-#[cfg(test)] mod tests { use super::*; #[test] fn hash_is_stable(){assert_eq!(hash(b"x"),hash(b"x"));} #[test] fn secret_metadata_is_hidden(){assert_eq!(safe_path(".env.token"),"[redacted-path]"); assert!(!safe_command("curl --token abc").contains("abc"));} #[test] fn path_is_not_truncated(){assert_eq!(safe_path("src/main.rs"),"src/main.rs");} }
+#[cfg(test)] mod tests { use super::*; #[test] fn hash_is_stable(){assert_eq!(hash(b"x"),hash(b"x"));} #[test] fn secret_metadata_is_hidden(){assert_eq!(safe_path(".env.token"),"[redacted-path]"); assert!(!safe_command("curl --token abc").contains("abc"));} #[test] fn path_is_not_truncated(){assert_eq!(safe_path("src/main.rs"),"src/main.rs");} #[test] fn default_ignores_secret_paths(){assert!(ignored(Path::new("."),"config/.env.local"));} }
