@@ -190,6 +190,47 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
         _ => Ok("broken".into()),
     }
 }
+fn integration_manifest_values(
+    root: &Path,
+    provider: &str,
+) -> Result<std::collections::BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(integration_manifest_path(root, provider))?;
+    Ok(text
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect())
+}
+fn bounded_context(text: &str, limit: usize) -> String {
+    let words = text.split_whitespace().take(limit).collect::<Vec<_>>();
+    if text.split_whitespace().count() > limit {
+        format!("{}\n[Relay context truncated]", words.join(" "))
+    } else {
+        words.join(" ")
+    }
+}
+fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let state = integration_state(root, provider)?;
+    if state != "ready" {
+        println!("Relay unavailable: {provider} integration {state}");
+        return Ok(());
+    }
+    let manifest = integration_manifest_values(root, provider)?;
+    let root_hash = hash(root.to_string_lossy().as_bytes());
+    let owned = fs::read(integration_owned_path(root, provider))?;
+    if manifest.get("root_hash") != Some(&root_hash)
+        || manifest.get("config_hash") != Some(&hash(&owned))
+    {
+        println!("Relay unavailable: {provider} integration drifted");
+        return Ok(());
+    }
+    if !daemon_active(root) {
+        start_daemon(root)?;
+    }
+    let c = db(root)?;
+    print!("{}", bounded_context(&card(root, &c)?, 320));
+    Ok(())
+}
 fn integration_command(
     root: &Path,
     mut args: impl Iterator<Item = String>,
@@ -251,8 +292,17 @@ fn integration_command(
             println!("{provider}: Relay-owned integration state initialized; capability probe required");
             Ok(())
         }
+        Some("emit") => {
+            let provider = args
+                .next()
+                .ok_or("usage: relay integration emit <codex|claude|grok>")?;
+            if args.next().is_some() || !integration_provider_is_valid(&provider) {
+                return Err("usage: relay integration emit <codex|claude|grok>".into());
+            }
+            integration_emit(root, &provider)
+        }
         _ => Err(
-            "usage: relay integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply>"
+            "usage: relay integration <status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>>"
                 .into(),
         ),
     }

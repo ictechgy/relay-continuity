@@ -113,6 +113,18 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
         fs::read_to_string(&config).expect("re-read foreign config"),
         format!("token = '{secret}'\nformatting = ' keep exact spacing '\n")
     );
+    let manifest_path = root.join(".relay/integrations/codex.state");
+    let manifest = fs::read_to_string(&manifest_path).expect("read manifest");
+    fs::write(
+        &manifest_path,
+        manifest.replace("state=unavailable", "state=ready"),
+    )
+    .expect("mark disposable adapter ready");
+    let emitted = run(&root, &["integration", "emit", "codex"]);
+    assert!(emitted.status.success());
+    assert!(String::from_utf8_lossy(&emitted.stdout).contains("# Relay context"));
+    assert!(!String::from_utf8_lossy(&emitted.stdout).contains(secret));
+    assert!(run(&root, &["daemon", "stop"]).status.success());
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
