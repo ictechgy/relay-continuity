@@ -505,6 +505,12 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut a = env::args().skip(1);
     let cmd = a.next().unwrap_or_else(|| "help".into());
+    if cmd == "help" {
+        println!(
+            "relay init | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | compact | explain | note <text> | status | resume | check <command>"
+        );
+        return Ok(());
+    }
     let root = env::current_dir()?;
     ensure_git(&root)?;
     let c = db(&root)?;

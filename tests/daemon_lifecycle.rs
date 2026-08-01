@@ -16,6 +16,23 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
+fn help_runs_without_creating_evidence_outside_a_git_worktree() {
+    let root = std::env::temp_dir().join(format!(
+        "relay-help-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create fixture");
+    let output = run(&root, &["help"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("relay init"));
+    assert!(!root.join(".relay").exists());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let root = std::env::temp_dir().join(format!(
         "relay-daemon-test-{}",
