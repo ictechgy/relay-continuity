@@ -21,6 +21,8 @@ raw command output.
 Tags beginning with `v` build a macOS and Linux binary plus a SHA-256 checksum
 for each platform in GitHub Actions. A public release is intentionally deferred
 until a repository owner and release authority are selected.
+The checked-in `rust-toolchain.toml` pins release and CI builds to Rust 1.97.1
+so a tag is rebuilt with the same compiler version.
 
 `relay init` creates local ignored state. `relay daemon start` runs a local
 filesystem watcher, debounces bursts for 750 ms, and records only a reconciled

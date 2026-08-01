@@ -15,7 +15,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo build --release --locked
       - run: mv target/release/relay relay-${{ matrix.asset }}
       - run: shasum -a 256 relay-${{ matrix.asset }} > relay-${{ matrix.asset }}.sha256
