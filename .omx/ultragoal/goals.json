@@ -5,8 +5,8 @@
   "codexObjectiveAliases": ["Implement Relay v0.1 according to the approved plan and this durable ledger."],
   "goals": [
     {"id":"G101","title":"Define integration contract and transactional configuration ownership","status":"complete"},
-    {"id":"G102","title":"Add user-scoped service lifecycle and safe session-start emitter","status":"in_progress"},
-    {"id":"G103","title":"Implement and verify the Codex trusted hook adapter","status":"pending"},
+    {"id":"G102","title":"Add user-scoped service lifecycle and safe session-start emitter","status":"complete"},
+    {"id":"G103","title":"Implement and verify the Codex trusted hook adapter","status":"in_progress"},
     {"id":"G104","title":"Probe and implement Claude and Grok adapters only where safe","status":"pending"},
     {"id":"G105","title":"Verify privacy, lifecycle, compatibility, and release readiness","status":"pending"}
   ]
