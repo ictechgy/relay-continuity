@@ -27,6 +27,9 @@ fn ready_path(root: &Path) -> PathBuf {
 fn writer_lock_path(root: &Path) -> PathBuf {
     relay_dir(root).join("writer.lock")
 }
+fn stop_path(root: &Path) -> PathBuf {
+    relay_dir(root).join("daemon.stop")
+}
 struct WriterLock(PathBuf);
 impl Drop for WriterLock {
     fn drop(&mut self) {
@@ -259,6 +262,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
+    let _ = fs::remove_file(stop_path(root));
     let nonce = hash(
         format!(
             "{}:{:?}",
@@ -296,32 +300,33 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let _ = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status();
+    let _ = fs::write(stop_path(root), &nonce);
     let _ = fs::remove_file(pid_path(root));
     let _ = fs::remove_file(ready_path(root));
     return Err("Relay daemon did not become ready".into());
 }
 fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let Some(pid) = read_pid(root) else {
+    if read_pid(root).is_none() {
         return Err("Relay daemon is not running".into());
-    };
+    }
     if !daemon_active(root) {
         let _ = fs::remove_file(pid_path(root));
         let _ = fs::remove_file(ready_path(root));
         return Err("Relay daemon state was stale; no process was stopped".into());
     }
-    let status = Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()?;
-    if !status.success() {
-        return Err("Relay daemon could not be stopped".into());
+    let nonce = read_nonce(root).ok_or("Relay daemon nonce is unavailable")?;
+    fs::write(stop_path(root), nonce)?;
+    for _ in 0..75 {
+        if !daemon_active(root) {
+            let _ = fs::remove_file(pid_path(root));
+            let _ = fs::remove_file(ready_path(root));
+            let _ = fs::remove_file(stop_path(root));
+            println!("Relay daemon stopped");
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
     }
-    fs::remove_file(pid_path(root))?;
-    let _ = fs::remove_file(ready_path(root));
-    println!("Relay daemon stopped");
-    Ok(())
+    Err("Relay daemon did not acknowledge the stop request; no process was signaled".into())
 }
 fn event_is_relevant(root: &Path, event: &Event) -> bool {
     event.paths.iter().any(|path| {
@@ -339,6 +344,11 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     observe(root, c)?;
     let mut pending: Option<Instant> = None;
     loop {
+        if fs::read_to_string(stop_path(root)).ok().as_deref() == Some(nonce) {
+            let _ = fs::remove_file(ready_path(root));
+            let _ = fs::remove_file(stop_path(root));
+            return Ok(());
+        }
         let timeout = pending
             .map(|changed| Duration::from_millis(750).saturating_sub(changed.elapsed()))
             .unwrap_or(Duration::from_millis(500));
@@ -509,7 +519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             fs::write(
                 relay_dir(&root).join(".gitignore"),
-                "evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\nwriter.lock\n",
+                "evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\ndaemon.stop\nwriter.lock\n",
             )?;
             let exclude = root.join(".git/info/exclude");
             let existing = fs::read_to_string(&exclude).unwrap_or_default();
