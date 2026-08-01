@@ -38,14 +38,14 @@ impl Drop for WriterLock {
 }
 fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
     let path = writer_lock_path(root);
-    for attempt in 0..2 {
+    for attempt in 0..=10 {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 write!(file, "{}", std::process::id())?;
                 file.sync_all()?;
                 return Ok(WriterLock(path));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let owner = fs::read_to_string(&path)
                     .ok()
                     .and_then(|text| text.trim().parse::<u32>().ok());
@@ -53,10 +53,10 @@ fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
                     let _ = fs::remove_file(&path);
                     continue;
                 }
-                return Err("Relay writer is busy; retry without modifying evidence".into());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err("Relay writer is busy; retry without modifying evidence".into());
+                if attempt == 10 {
+                    return Err("Relay writer is busy; retry without modifying evidence".into());
+                }
+                thread::sleep(Duration::from_millis(25));
             }
             Err(error) => return Err(error.into()),
         }
