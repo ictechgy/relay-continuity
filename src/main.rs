@@ -1,5 +1,5 @@
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, ErrorCode, params};
 use sha2::{Digest, Sha256};
 use std::{
     env,
@@ -21,6 +21,9 @@ fn relay_dir(root: &Path) -> PathBuf {
 fn pid_path(root: &Path) -> PathBuf {
     relay_dir(root).join("daemon.pid")
 }
+fn ready_path(root: &Path) -> PathBuf {
+    relay_dir(root).join("daemon.ready")
+}
 fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let ok = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -31,18 +34,50 @@ fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-fn db(root: &Path) -> rusqlite::Result<Connection> {
-    let dir = relay_dir(root);
-    fs::create_dir_all(&dir).expect("create .relay");
-    let c = Connection::open(dir.join("evidence.sqlite"))?;
-    c.execute_batch("PRAGMA journal_mode=WAL;
+fn create_schema(c: &Connection) -> rusqlite::Result<()> {
+    c.execute_batch(
+        "PRAGMA journal_mode=WAL;
       PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, kind TEXT NOT NULL, snapshot TEXT NOT NULL, detail TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);
       CREATE TABLE IF NOT EXISTS epochs(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, event_count INTEGER NOT NULL, check_count INTEGER NOT NULL, summary_hash TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS annotations(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);" )?;
-    Ok(c)
+      CREATE TABLE IF NOT EXISTS annotations(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+    )
+}
+fn corrupt_database(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(inner.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+    )
+}
+fn db(root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
+    let dir = relay_dir(root);
+    fs::create_dir_all(&dir)?;
+    let path = dir.join("evidence.sqlite");
+    let c = Connection::open(&path)?;
+    match create_schema(&c) {
+        Ok(()) => Ok(c),
+        Err(error) if corrupt_database(&error) => {
+            drop(c);
+            let backup = dir.join(format!(
+                "evidence.sqlite.corrupt-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs()
+            ));
+            fs::rename(&path, backup)?;
+            let c = Connection::open(&path)?;
+            create_schema(&c)?;
+            c.execute(
+                "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
+                params![snapshot(root)],
+            )?;
+            Ok(c)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 fn git(root: &Path, args: &[&str]) -> String {
     Command::new("git")
@@ -131,6 +166,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Relay daemon is already active".into());
     }
     let _ = fs::remove_file(pid_path(root));
+    let _ = fs::remove_file(ready_path(root));
     let mut pid_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -151,8 +187,19 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     };
     write!(pid_file, "{}", child.id())?;
     pid_file.sync_all()?;
-    println!("Relay daemon started (pid {})", child.id());
-    Ok(())
+    for _ in 0..150 {
+        if ready_path(root).exists() && process_active(child.id()) {
+            println!("Relay daemon started (pid {})", child.id());
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status();
+    let _ = fs::remove_file(pid_path(root));
+    let _ = fs::remove_file(ready_path(root));
+    return Err("Relay daemon did not become ready".into());
 }
 fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let Some(pid) = read_pid(root) else {
@@ -167,6 +214,7 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     fs::remove_file(pid_path(root))?;
+    let _ = fs::remove_file(ready_path(root));
     println!("Relay daemon stopped");
     Ok(())
 }
@@ -174,6 +222,7 @@ fn run_daemon(root: &Path, c: &Connection) -> Result<(), Box<dyn std::error::Err
     let (tx, rx) = channel();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(root, RecursiveMode::Recursive)?;
+    fs::write(ready_path(root), "ready")?;
     observe(root, c)?;
     let mut pending: Option<Instant> = None;
     loop {
@@ -316,7 +365,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             fs::write(
                 relay_dir(&root).join(".gitignore"),
-                "evidence.sqlite*\ncurrent.md\ndaemon.pid\n",
+                "evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\n",
             )?;
             let exclude = root.join(".git/info/exclude");
             let existing = fs::read_to_string(&exclude).unwrap_or_default();
@@ -512,6 +561,41 @@ mod tests {
             record_check(&root, &c, 0, "true")
                 .unwrap()
                 .contains("STATUS: FRESH")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn corrupt_database_is_preserved_before_safe_recovery() {
+        let root = env::temp_dir().join(format!(
+            "relay-recovery-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        fs::write(
+            relay_dir(&root).join("evidence.sqlite"),
+            "not a sqlite database",
+        )
+        .unwrap();
+        let c = db(&root).unwrap();
+        let recovered: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='recovered'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovered, 1);
+        assert!(
+            fs::read_dir(relay_dir(&root))
+                .unwrap()
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("evidence.sqlite.corrupt-"))
         );
         fs::remove_dir_all(root).unwrap();
     }

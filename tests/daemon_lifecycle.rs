@@ -67,10 +67,17 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
 
     fs::write(root.join("tracked.txt"), "first").expect("first burst write");
     fs::write(root.join("tracked.txt"), "second").expect("second burst write");
-    thread::sleep(Duration::from_millis(1500));
-    let resume = run(&root, &["resume"]);
-    assert!(resume.status.success());
-    assert!(String::from_utf8_lossy(&resume.stdout).contains("STATUS: FRESH"));
+    let mut resume_text = String::new();
+    for _ in 0..24 {
+        let resume = run(&root, &["resume"]);
+        assert!(resume.status.success());
+        resume_text = String::from_utf8_lossy(&resume.stdout).into_owned();
+        if resume_text.contains("STATUS: FRESH") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(resume_text.contains("STATUS: FRESH"), "{resume_text}");
 
     let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("open evidence");
     let event_count: i64 = database
