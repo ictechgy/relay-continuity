@@ -51,10 +51,11 @@ source, diffs, outputs, or annotations.
 | Git/filesystem/check evidence | Supported without a provider adapter |
 | Codex, Claude, Grok, or other AI chat state | Not captured |
 | GUI context injection or quota-end detection | Unsupported |
-| Provider adapters | Not shipped in v0.1; the generic core remains available |
+| Provider adapters | Optional typed metadata from `codex`, `claude`, and `grok`; generic core remains available |
 
-`relay adapter <provider> <metadata>` rejects all input in v0.1. This explicit
-boundary prevents malformed or provider-shaped metadata from being mistaken for
-verified evidence or entering the core database.
+`relay adapter <provider> <metadata-type>` accepts only a short ASCII metadata
+type from `codex`, `claude`, or `grok`, then stores a hash rather than the value.
+Malformed or unsupported input is rejected before it can enter the core
+database, and adapter metadata cannot write cards or prove an assertion.
 
 Relay carries observable work evidence, not a complete AI thought process.

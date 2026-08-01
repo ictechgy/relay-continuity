@@ -263,6 +263,20 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .windows(b"malformed-secret-payload".len())
             .any(|bytes| bytes == b"malformed-secret-payload")
     );
+    let adapter = run(&root, &["adapter", "codex", "checkpoint"]);
+    assert!(adapter.status.success());
+    let database =
+        Connection::open(root.join(".relay/evidence.sqlite")).expect("read typed adapter");
+    let metadata_hash: String = database
+        .query_row(
+            "SELECT metadata_hash FROM adapter_metadata ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read adapter hash");
+    assert!(metadata_hash.starts_with("metadata#"));
+    assert!(!metadata_hash.contains("checkpoint"));
+    drop(database);
     let hook = run(&root, &["shell", "zsh"]);
     assert!(hook.status.success());
     assert!(String::from_utf8_lossy(&hook.stdout).contains("record-check"));

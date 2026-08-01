@@ -85,7 +85,8 @@ fn create_schema(c: &Connection) -> rusqlite::Result<()> {
       CREATE TABLE IF NOT EXISTS checks(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, command TEXT NOT NULL, exit_code INTEGER NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS assertions(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, claim TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('valid','stale','broken','unknown')), check_id INTEGER);
       CREATE TABLE IF NOT EXISTS epochs(id INTEGER PRIMARY KEY, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, event_count INTEGER NOT NULL, check_count INTEGER NOT NULL, summary_hash TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS annotations(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
+      CREATE TABLE IF NOT EXISTS annotations(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      CREATE TABLE IF NOT EXISTS adapter_metadata(id INTEGER PRIMARY KEY, provider TEXT NOT NULL, snapshot TEXT NOT NULL, metadata_hash TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
     )
 }
 fn corrupt_database(error: &rusqlite::Error) -> bool {
@@ -470,6 +471,33 @@ fn shell_hook(shell: &str) -> Result<&'static str, Box<dyn std::error::Error>> {
         _ => Err("usage: relay shell <zsh|bash|fish>".into()),
     }
 }
+fn adapter_type_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+fn record_adapter(
+    root: &Path,
+    c: &Connection,
+    provider: &str,
+    metadata_type: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !matches!(provider, "codex" | "claude" | "grok") || !adapter_type_is_valid(metadata_type) {
+        return Err("Relay rejected malformed or unsupported adapter metadata".into());
+    }
+    let _lock = writer_lock(root)?;
+    c.execute(
+        "INSERT INTO adapter_metadata(provider,snapshot,metadata_hash) VALUES(?1,?2,?3)",
+        params![
+            provider,
+            snapshot(root)?,
+            format!("metadata#{}", &hash(metadata_type.as_bytes())[..12])
+        ],
+    )?;
+    Ok(())
+}
 fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error>> {
     let now = snapshot(root)?;
     let last: String = c
@@ -608,11 +636,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "shell" => print!("{}", shell_hook(a.next().as_deref().unwrap_or(""))?),
         "adapter" => {
             let provider = a.next().unwrap_or_default();
-            let has_metadata = a.next().is_some();
-            if provider.is_empty() || !has_metadata {
+            let metadata_type = a.collect::<Vec<_>>().join(" ");
+            if provider.is_empty() || metadata_type.is_empty() {
                 return Err("usage: relay adapter <provider> <metadata>".into());
             }
-            return Err("Relay v0.1 has no installed adapters; metadata was rejected".into());
+            record_adapter(&root, &c, &provider, &metadata_type)?;
+            println!("accepted typed adapter metadata");
         }
         "compact" => {
             let _lock = writer_lock(&root)?;
