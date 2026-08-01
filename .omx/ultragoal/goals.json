@@ -8,6 +8,6 @@
     {"id":"G102","title":"Add user-scoped service lifecycle and safe session-start emitter","status":"complete"},
     {"id":"G103","title":"Implement and verify the Codex trusted hook adapter","status":"complete"},
     {"id":"G104","title":"Probe and implement Claude and Grok adapters only where safe","status":"complete"},
-    {"id":"G105","title":"Verify privacy, lifecycle, compatibility, and release readiness","status":"in_progress"}
+    {"id":"G105","title":"Verify privacy, lifecycle, compatibility, and release readiness","status":"complete"}
   ]
 }
