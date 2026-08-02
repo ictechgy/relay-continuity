@@ -1,15 +1,24 @@
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::{
     env,
     fs::{self, OpenOptions},
     io::{Read, Write},
+    ops::Deref,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{RecvTimeoutError, channel},
     thread,
     time::{Duration, Instant},
+};
+#[cfg(unix)]
+use std::{
+    ffi::CString,
+    os::unix::{
+        ffi::OsStrExt,
+        io::{AsRawFd, FromRawFd},
+    },
 };
 
 fn hash(bytes: &[u8]) -> String {
@@ -17,18 +26,6 @@ fn hash(bytes: &[u8]) -> String {
 }
 fn relay_dir(root: &Path) -> PathBuf {
     root.join(".relay")
-}
-fn pid_path(root: &Path) -> PathBuf {
-    relay_dir(root).join("daemon.pid")
-}
-fn ready_path(root: &Path) -> PathBuf {
-    relay_dir(root).join("daemon.ready")
-}
-fn writer_lock_path(root: &Path) -> PathBuf {
-    relay_dir(root).join("writer.lock")
-}
-fn stop_path(root: &Path) -> PathBuf {
-    relay_dir(root).join("daemon.stop")
 }
 fn integration_dir(root: &Path) -> PathBuf {
     relay_dir(root).join("integrations")
@@ -209,6 +206,284 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::E
     }
     result
 }
+#[cfg(unix)]
+fn managed_component(component: &str) -> Result<CString, Box<dyn std::error::Error>> {
+    if component.is_empty() || component == "." || component == ".." || component.contains('/') {
+        return Err("Relay rejected an unsafe managed path component".into());
+    }
+    Ok(CString::new(component)?)
+}
+#[cfg(unix)]
+fn open_directory_no_follow(path: &Path) -> Result<fs::File, Box<dyn std::error::Error>> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    let descriptor = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+#[cfg(unix)]
+fn open_directory_at_no_follow(
+    parent: &fs::File,
+    component: &CString,
+) -> Result<fs::File, Box<dyn std::error::Error>> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            component.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+#[cfg(unix)]
+fn managed_directory_no_follow(
+    root: &Path,
+    components: &[&str],
+    create_missing: bool,
+) -> Result<fs::File, Box<dyn std::error::Error>> {
+    let mut directory = open_directory_no_follow(root)?;
+    for component in components {
+        let component = managed_component(component)?;
+        directory = match open_directory_at_no_follow(&directory, &component) {
+            Ok(directory) => directory,
+            Err(error)
+                if create_missing
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                if unsafe { libc::mkdirat(directory.as_raw_fd(), component.as_ptr(), 0o700) } != 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                open_directory_at_no_follow(&directory, &component)?
+            }
+            Err(error) => return Err(error),
+        };
+    }
+    Ok(directory)
+}
+#[cfg(unix)]
+fn atomic_replace_at(
+    parent: &fs::File,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let name = managed_component(file_name)?;
+    let temporary = CString::new(format!(
+        ".{file_name}.relay-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ))?;
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            temporary.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        if unsafe {
+            libc::renameat(
+                parent.as_raw_fd(),
+                temporary.as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let verify_descriptor = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if verify_descriptor < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let mut verified = Vec::new();
+        unsafe { fs::File::from_raw_fd(verify_descriptor) }.read_to_end(&mut verified)?;
+        if hash(&verified) != hash(bytes) {
+            return Err("Relay could not verify atomic managed write".into());
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        unsafe {
+            libc::unlinkat(parent.as_raw_fd(), temporary.as_ptr(), 0);
+        }
+    }
+    result
+}
+#[cfg(unix)]
+fn read_file_at_no_follow(
+    parent: &fs::File,
+    file_name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let name = managed_component(file_name)?;
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut bytes = Vec::new();
+    unsafe { fs::File::from_raw_fd(descriptor) }.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+#[cfg(unix)]
+fn rename_file_at(
+    parent: &fs::File,
+    from: &str,
+    to: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let from = managed_component(from)?;
+    let to = managed_component(to)?;
+    if unsafe {
+        libc::renameat(
+            parent.as_raw_fd(),
+            from.as_ptr(),
+            parent.as_raw_fd(),
+            to.as_ptr(),
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+fn atomic_replace_managed(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        let parent = managed_directory_no_follow(root, components, true)?;
+        atomic_replace_at(&parent, file_name, bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut path = root.to_path_buf();
+        for component in components {
+            path.push(component);
+        }
+        fs::create_dir_all(&path)?;
+        atomic_replace(&path.join(file_name), bytes)
+    }
+}
+#[cfg(unix)]
+fn read_managed_file(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let parent = managed_directory_no_follow(root, components, false)?;
+    read_file_at_no_follow(&parent, file_name)
+}
+#[cfg(not(unix))]
+fn read_managed_file(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let mut path = root.to_path_buf();
+    for component in components {
+        path.push(component);
+    }
+    Ok(fs::read(path.join(file_name))?)
+}
+#[cfg(unix)]
+fn remove_managed_file(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parent = managed_directory_no_follow(root, components, false)?;
+    let name = managed_component(file_name)?;
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
+fn remove_managed_file(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut path = root.to_path_buf();
+    for component in components {
+        path.push(component);
+    }
+    fs::remove_file(path.join(file_name))?;
+    Ok(())
+}
+#[cfg(unix)]
+fn create_new_managed_file(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+) -> Result<fs::File, Box<dyn std::error::Error>> {
+    let parent = managed_directory_no_follow(root, components, true)?;
+    let name = managed_component(file_name)?;
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+#[cfg(not(unix))]
+fn create_new_managed_file(
+    root: &Path,
+    components: &[&str],
+    file_name: &str,
+) -> Result<fs::File, Box<dyn std::error::Error>> {
+    let mut path = root.to_path_buf();
+    for component in components {
+        path.push(component);
+    }
+    fs::create_dir_all(&path)?;
+    Ok(OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path.join(file_name))?)
+}
 fn integration_manifest_bytes(
     root: &Path,
     provider: &str,
@@ -242,7 +517,12 @@ fn write_integration_manifest(
 ) -> Result<(), Box<dyn std::error::Error>> {
     ensure_integration_directory(root, true)?;
     let manifest = integration_manifest_bytes(root, provider, state, config_bytes, None)?;
-    atomic_replace(&integration_manifest_path(root, provider), &manifest)
+    atomic_replace_managed(
+        root,
+        &[".relay", "integrations"],
+        &format!("{provider}.state"),
+        &manifest,
+    )
 }
 fn write_codex_manifest(
     root: &Path,
@@ -252,7 +532,7 @@ fn write_codex_manifest(
 ) -> Result<(), Box<dyn std::error::Error>> {
     ensure_integration_directory(root, true)?;
     let manifest = integration_manifest_bytes(root, "codex", state, owned_bytes, Some(hook_bytes))?;
-    atomic_replace(&integration_manifest_path(root, "codex"), &manifest)
+    atomic_replace_managed(root, &[".relay", "integrations"], "codex.state", &manifest)
 }
 fn codex_hook_matches_manifest(
     root: &Path,
@@ -487,8 +767,8 @@ fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             let owned = codex_owned_state("awaiting_trust", &hook);
             // Writing ownership first means a failed hook write leaves no
             // live hook behind. A retry simply drives the same state forward.
-            atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
-            atomic_replace(&hook_path, &hook)?;
+            atomic_replace_managed(root, &[".relay", "integrations"], "codex.owned", &owned)?;
+            atomic_replace_managed(root, &[".codex"], "hooks.json", &hook)?;
             write_codex_manifest(root, "awaiting_trust", &owned, &hook)
         }
         Err(error) => Err(error.into()),
@@ -506,7 +786,7 @@ fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             // cannot turn an orphaned hook into adopted state by recreating
             // only the hook after Relay ownership was removed.
             let owned = codex_owned_state("awaiting_trust", &hook);
-            atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+            atomic_replace_managed(root, &[".relay", "integrations"], "codex.owned", &owned)?;
             write_codex_manifest(root, "awaiting_trust", &owned, &hook)
         }
         Ok(current)
@@ -551,7 +831,12 @@ fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     },
                 );
             if manifest_is_ready {
-                return atomic_replace(&integration_owned_path(root, "codex"), &ready);
+                return atomic_replace_managed(
+                    root,
+                    &[".relay", "integrations"],
+                    "codex.owned",
+                    &ready,
+                );
             }
             if integration_state(root, "codex")? != "awaiting_trust"
                 || !codex_hook_matches_manifest(root, &values)
@@ -565,20 +850,19 @@ fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             // Publish the complete manifest first. A retry can safely finish
             // the owned-state write if the process stops between these writes.
             write_codex_manifest(root, "ready", &ready, &hook)?;
-            atomic_replace(&integration_owned_path(root, "codex"), &ready)
+            atomic_replace_managed(root, &[".relay", "integrations"], "codex.owned", &ready)
         }
         _ => Err("Relay Codex integration is not an unchanged awaiting-trust installation".into()),
     }
 }
 fn codex_uninstall(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_preflight(root)?;
-    let hook_path = codex_hook_path(root);
     if !codex_owned_provenance(root, &hook) {
         return Err("Relay Codex hook ownership is unproven; no file was removed".into());
     }
-    fs::remove_file(&hook_path)?;
+    remove_managed_file(root, &[".codex"], "hooks.json")?;
     let owned = codex_owned_state("disabled", &hook);
-    atomic_replace(&integration_owned_path(root, "codex"), &owned)?;
+    atomic_replace_managed(root, &[".relay", "integrations"], "codex.owned", &owned)?;
     write_integration_manifest(root, "codex", "disabled", &owned)
 }
 fn codex_hook_output(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -703,17 +987,14 @@ fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     let c = db(root)?;
-    let _ = fs::remove_file(pid_path(root));
-    let _ = fs::remove_file(ready_path(root));
-    let _ = fs::remove_file(stop_path(root));
+    let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
     let nonce = format!(
         "service-{}",
         &hash(format!("{}:{}", root.display(), std::process::id()).as_bytes())[..16]
     );
-    let mut pid_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(pid_path(root))?;
+    let mut pid_file = create_new_managed_file(root, &[".relay"], "daemon.pid")?;
     write!(pid_file, "{}\n{}", std::process::id(), nonce)?;
     pid_file.sync_all()?;
     run_daemon(root, &c, &nonce)
@@ -821,7 +1102,12 @@ fn integration_command(
             let owned = format!(
                 "version=1\nprovider={provider}\nstate=unavailable\nreason=capability-probe-required\n"
             );
-            atomic_replace(&integration_owned_path(root, &provider), owned.as_bytes())?;
+            atomic_replace_managed(
+                root,
+                &[".relay", "integrations"],
+                &format!("{provider}.owned"),
+                owned.as_bytes(),
+            )?;
             write_integration_manifest(root, &provider, "unavailable", owned.as_bytes())?;
             println!("{provider}: Relay-owned integration state initialized; capability probe required");
             Ok(())
@@ -900,25 +1186,29 @@ fn integration_command(
 struct WriterLock(PathBuf);
 impl Drop for WriterLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        let _ = remove_managed_file(&self.0, &[".relay"], "writer.lock");
     }
 }
 fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
     ensure_relay_directory(root, true)?;
-    let path = writer_lock_path(root);
     for attempt in 0..=10 {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        match create_new_managed_file(root, &[".relay"], "writer.lock") {
             Ok(mut file) => {
                 write!(file, "{}", std::process::id())?;
                 file.sync_all()?;
-                return Ok(WriterLock(path));
+                return Ok(WriterLock(root.to_path_buf()));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let owner = fs::read_to_string(&path)
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
+            {
+                let owner = read_managed_file(root, &[".relay"], "writer.lock")
                     .ok()
+                    .and_then(|text| String::from_utf8(text).ok())
                     .and_then(|text| text.trim().parse::<u32>().ok());
                 if owner.is_none_or(|pid| !process_active(pid)) {
-                    let _ = fs::remove_file(&path);
+                    let _ = remove_managed_file(root, &[".relay"], "writer.lock");
                     continue;
                 }
                 if attempt == 10 {
@@ -926,7 +1216,7 @@ fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
                 }
                 thread::sleep(Duration::from_millis(25));
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(error),
         }
     }
     Err("Relay writer is busy; retry without modifying evidence".into())
@@ -978,6 +1268,64 @@ fn corrupt_database(error: &rusqlite::Error) -> bool {
             if matches!(inner.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
     )
 }
+struct Database {
+    connection: Connection,
+    #[cfg(unix)]
+    _directory: fs::File,
+}
+impl Deref for Database {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+fn database_path(root: &Path) -> PathBuf {
+    relay_dir(root).join("evidence.sqlite")
+}
+#[cfg(unix)]
+fn open_database(path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+}
+#[cfg(not(unix))]
+fn open_database(path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open(path)
+}
+#[cfg(unix)]
+fn quarantine_database(directory: &fs::File) -> Result<(), Box<dyn std::error::Error>> {
+    let suffix = format!(
+        "corrupt-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
+    rename_file_at(
+        directory,
+        "evidence.sqlite",
+        &format!("evidence.sqlite.{suffix}"),
+    )?;
+    for sidecar in ["-wal", "-shm"] {
+        match rename_file_at(
+            directory,
+            &format!("evidence.sqlite{sidecar}"),
+            &format!("evidence.sqlite.{suffix}{sidecar}"),
+        ) {
+            Ok(()) => {}
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+#[cfg(not(unix))]
 fn quarantine_database(dir: &Path, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let suffix = format!(
         "corrupt-{}",
@@ -997,21 +1345,61 @@ fn quarantine_database(dir: &Path, path: &Path) -> Result<(), Box<dyn std::error
     }
     Ok(())
 }
-fn recovered_db(
-    root: &Path,
-    dir: &Path,
-    path: &Path,
-) -> Result<Connection, Box<dyn std::error::Error>> {
-    quarantine_database(dir, path)?;
-    let c = Connection::open(path)?;
+#[cfg(unix)]
+fn recovered_db(root: &Path, directory: fs::File) -> Result<Database, Box<dyn std::error::Error>> {
+    quarantine_database(&directory)?;
+    let c = open_database(&database_path(root))?;
     create_schema(&c)?;
     c.execute(
         "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
         params![snapshot(root)?],
     )?;
-    Ok(c)
+    Ok(Database {
+        connection: c,
+        _directory: directory,
+    })
 }
-fn db(root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
+#[cfg(not(unix))]
+fn recovered_db(
+    root: &Path,
+    dir: &Path,
+    path: &Path,
+) -> Result<Database, Box<dyn std::error::Error>> {
+    quarantine_database(dir, path)?;
+    let c = open_database(path)?;
+    create_schema(&c)?;
+    c.execute(
+        "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
+        params![snapshot(root)?],
+    )?;
+    Ok(Database { connection: c })
+}
+#[cfg(unix)]
+fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
+    let root = fs::canonicalize(root)?;
+    let root = root.as_path();
+    let directory = managed_directory_no_follow(root, &[".relay"], true)?;
+    if read_file_at_no_follow(&directory, "evidence.sqlite")
+        .ok()
+        .is_some_and(|bytes| !bytes.is_empty() && !bytes.starts_with(b"SQLite format 3\0"))
+    {
+        return recovered_db(root, directory);
+    }
+    let c = open_database(&database_path(root))?;
+    match create_schema(&c) {
+        Ok(()) => Ok(Database {
+            connection: c,
+            _directory: directory,
+        }),
+        Err(error) if corrupt_database(&error) => {
+            drop(c);
+            recovered_db(root, directory)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+#[cfg(not(unix))]
+fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
     ensure_relay_directory(root, true)?;
     let dir = relay_dir(root);
     let path = dir.join("evidence.sqlite");
@@ -1021,9 +1409,9 @@ fn db(root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
     {
         return recovered_db(root, &dir, &path);
     }
-    let c = Connection::open(&path)?;
+    let c = open_database(&path)?;
     match create_schema(&c) {
-        Ok(()) => Ok(c),
+        Ok(()) => Ok(Database { connection: c }),
         Err(error) if corrupt_database(&error) => {
             drop(c);
             recovered_db(root, &dir, &path)
@@ -1199,7 +1587,7 @@ fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Erro
     Ok(false)
 }
 fn read_pid(root: &Path) -> Option<u32> {
-    fs::read_to_string(pid_path(root))
+    String::from_utf8(read_managed_file(root, &[".relay"], "daemon.pid").ok()?)
         .ok()?
         .lines()
         .next()?
@@ -1207,7 +1595,7 @@ fn read_pid(root: &Path) -> Option<u32> {
         .ok()
 }
 fn read_nonce(root: &Path) -> Option<String> {
-    fs::read_to_string(pid_path(root))
+    String::from_utf8(read_managed_file(root, &[".relay"], "daemon.pid").ok()?)
         .ok()?
         .lines()
         .nth(1)
@@ -1226,7 +1614,11 @@ fn daemon_active(root: &Path) -> bool {
         return false;
     };
     process_active(pid)
-        && fs::read_to_string(ready_path(root)).ok().as_deref() == Some(nonce.as_str())
+        && read_managed_file(root, &[".relay"], "daemon.ready")
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .as_deref()
+            == Some(nonce.as_str())
 }
 fn daemon_state(root: &Path) -> &'static str {
     if daemon_active(root) {
@@ -1239,9 +1631,9 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if daemon_active(root) {
         return Err("Relay daemon is already active".into());
     }
-    let _ = fs::remove_file(pid_path(root));
-    let _ = fs::remove_file(ready_path(root));
-    let _ = fs::remove_file(stop_path(root));
+    let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
     let nonce = hash(
         format!(
             "{}:{:?}",
@@ -1251,10 +1643,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         .as_bytes(),
     )[..16]
         .to_owned();
-    let mut pid_file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(pid_path(root))?;
+    let mut pid_file = create_new_managed_file(root, &[".relay"], "daemon.pid")?;
     let child = match Command::new(env::current_exe()?)
         .args(["daemon", "run"])
         .arg(&nonce)
@@ -1266,7 +1655,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     {
         Ok(child) => child,
         Err(error) => {
-            let _ = fs::remove_file(pid_path(root));
+            let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
             return Err(error.into());
         }
     };
@@ -1279,9 +1668,9 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let _ = atomic_replace(&stop_path(root), nonce.as_bytes());
-    let _ = fs::remove_file(pid_path(root));
-    let _ = fs::remove_file(ready_path(root));
+    let _ = atomic_replace_managed(root, &[".relay"], "daemon.stop", nonce.as_bytes());
+    let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
     Err("Relay daemon did not become ready".into())
 }
 fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1289,17 +1678,17 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Relay daemon is not running".into());
     }
     if !daemon_active(root) {
-        let _ = fs::remove_file(pid_path(root));
-        let _ = fs::remove_file(ready_path(root));
+        let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
+        let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
         return Err("Relay daemon state was stale; no process was stopped".into());
     }
     let nonce = read_nonce(root).ok_or("Relay daemon nonce is unavailable")?;
-    atomic_replace(&stop_path(root), nonce.as_bytes())?;
+    atomic_replace_managed(root, &[".relay"], "daemon.stop", nonce.as_bytes())?;
     for _ in 0..75 {
         if !daemon_active(root) {
-            let _ = fs::remove_file(pid_path(root));
-            let _ = fs::remove_file(ready_path(root));
-            let _ = fs::remove_file(stop_path(root));
+            let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
+            let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
+            let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
             println!("Relay daemon stopped");
             return Ok(());
         }
@@ -1319,7 +1708,7 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     let (tx, rx) = channel();
     let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
     watcher.watch(root, RecursiveMode::Recursive)?;
-    atomic_replace(&ready_path(root), nonce.as_bytes())?;
+    atomic_replace_managed(root, &[".relay"], "daemon.ready", nonce.as_bytes())?;
     if let Err(error) = observe(root, c)
         && !writer_busy(error.as_ref())
     {
@@ -1328,9 +1717,14 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     let mut last_reconcile = Instant::now();
     let mut pending: Option<Instant> = None;
     loop {
-        if fs::read_to_string(stop_path(root)).ok().as_deref() == Some(nonce) {
-            let _ = fs::remove_file(ready_path(root));
-            let _ = fs::remove_file(stop_path(root));
+        if read_managed_file(root, &[".relay"], "daemon.stop")
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .as_deref()
+            == Some(nonce)
+        {
+            let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
+            let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
             return Ok(());
         }
         let timeout = pending
@@ -1539,7 +1933,7 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
     if text.split_whitespace().count() > 800 {
         return Err(rusqlite::Error::InvalidQuery.into());
     }
-    atomic_replace(&relay_dir(root).join("current.md"), text.as_bytes())?;
+    atomic_replace_managed(root, &[".relay"], "current.md", text.as_bytes())?;
     Ok(text)
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1565,8 +1959,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "INSERT INTO events(kind,snapshot,detail) VALUES('repository-binding',?1,?2)",
                 params![s, state_detail(&state)],
             )?;
-            atomic_replace(
-                &relay_dir(&root).join(".gitignore"),
+            atomic_replace_managed(
+                &root,
+                &[".relay"],
+                ".gitignore",
                 b"evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\ndaemon.stop\nwriter.lock\n",
             )?;
             let exclude = root.join(".git/info/exclude");
@@ -1778,6 +2174,69 @@ mod tests {
         );
         fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn managed_descriptor_write_stays_in_the_opened_directory_after_path_swap() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!(
+            "relay-descriptor-write-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let outside = env::temp_dir().join(format!(
+            "relay-descriptor-write-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let directory = managed_directory_no_follow(&root, &[".relay"], false).unwrap();
+        let original = root.join(".relay-opened");
+        fs::rename(relay_dir(&root), &original).unwrap();
+        symlink(&outside, relay_dir(&root)).unwrap();
+
+        atomic_replace_at(&directory, "sentinel", b"anchored").unwrap();
+
+        assert_eq!(fs::read(original.join("sentinel")).unwrap(), b"anchored");
+        assert!(!outside.join("sentinel").exists());
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn database_refuses_a_symlinked_evidence_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!(
+            "relay-database-symlink-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let outside = env::temp_dir().join(format!(
+            "relay-database-symlink-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let target = outside.join("evidence.sqlite");
+        fs::write(&target, "PRECIOUS").unwrap();
+        symlink(&target, relay_dir(&root).join("evidence.sqlite")).unwrap();
+
+        assert!(db(&root).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "PRECIOUS");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
     #[test]
     fn service_templates_are_root_scoped_and_escape_worktree_paths() {
         let root = Path::new("/tmp/relay & <worktree>");
@@ -1832,10 +2291,10 @@ mod tests {
         fs::create_dir_all(relay_dir(&root)).unwrap();
         let first = writer_lock(&root).unwrap();
         assert!(writer_lock(&root).is_err());
-        assert!(writer_lock_path(&root).exists());
+        assert!(relay_dir(&root).join("writer.lock").exists());
         drop(first);
         assert!(writer_lock(&root).is_ok());
-        fs::write(writer_lock_path(&root), "999999999").unwrap();
+        fs::write(relay_dir(&root).join("writer.lock"), "999999999").unwrap();
         assert!(
             writer_lock(&root).is_ok(),
             "dead lock owner must be reclaimed"

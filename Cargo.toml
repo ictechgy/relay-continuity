@@ -10,6 +10,7 @@ name = "relay"
 path = "src/main.rs"
 
 [dependencies]
+libc = "0.2"
 notify = "8.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
