@@ -31,6 +31,13 @@ inspect that process. Stop is a nonce-checked local request; Relay never sends
 a signal to a PID from its state file. `relay status` always says whether generic capture is
 active and keeps semantic context explicitly `unknown` without an adapter.
 
+## Platform support
+
+Relay's managed local state is supported on macOS and Linux. Those platforms
+use descriptor-relative, no-follow filesystem operations for managed paths.
+Windows is intentionally unsupported: Relay fails closed rather than using an
+unsafe path-based fallback for evidence, daemon, or provider-integration state.
+
 `relay check <command>` records only a safe command identity and exit code, and
 `relay note <text>` writes an explicitly unverified, hashed annotation. The
 legacy `relay watch 60` command remains a foreground polling diagnostic, not

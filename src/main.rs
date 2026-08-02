@@ -1,11 +1,12 @@
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
-use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
+#[cfg(unix)]
+use rusqlite::{ErrorCode, OpenFlags};
 use sha2::{Digest, Sha256};
 use std::{
     env,
     fs::{self, OpenOptions},
     io::{Read, Write},
-    ops::Deref,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc::{RecvTimeoutError, channel},
@@ -15,6 +16,7 @@ use std::{
 #[cfg(unix)]
 use std::{
     ffi::CString,
+    ops::Deref,
     os::unix::{
         ffi::OsStrExt,
         io::{AsRawFd, FromRawFd},
@@ -389,12 +391,8 @@ fn atomic_replace_managed(
     }
     #[cfg(not(unix))]
     {
-        let mut path = root.to_path_buf();
-        for component in components {
-            path.push(component);
-        }
-        fs::create_dir_all(&path)?;
-        atomic_replace(&path.join(file_name), bytes)
+        let _ = (root, components, file_name, bytes);
+        Err("Relay managed state requires Unix descriptor-relative file operations".into())
     }
 }
 #[cfg(unix)]
@@ -412,11 +410,8 @@ fn read_managed_file(
     components: &[&str],
     file_name: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let mut path = root.to_path_buf();
-    for component in components {
-        path.push(component);
-    }
-    Ok(fs::read(path.join(file_name))?)
+    let _ = (root, components, file_name);
+    Err("Relay managed state requires Unix descriptor-relative file operations".into())
 }
 fn is_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
     error
@@ -442,12 +437,8 @@ fn remove_managed_file(
     components: &[&str],
     file_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut path = root.to_path_buf();
-    for component in components {
-        path.push(component);
-    }
-    fs::remove_file(path.join(file_name))?;
-    Ok(())
+    let _ = (root, components, file_name);
+    Err("Relay managed state requires Unix descriptor-relative file operations".into())
 }
 #[cfg(unix)]
 fn create_new_managed_file(
@@ -476,15 +467,8 @@ fn create_new_managed_file(
     components: &[&str],
     file_name: &str,
 ) -> Result<fs::File, Box<dyn std::error::Error>> {
-    let mut path = root.to_path_buf();
-    for component in components {
-        path.push(component);
-    }
-    fs::create_dir_all(&path)?;
-    Ok(OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path.join(file_name))?)
+    let _ = (root, components, file_name);
+    Err("Relay managed state requires Unix descriptor-relative file operations".into())
 }
 fn integration_manifest_bytes(
     root: &Path,
@@ -1279,6 +1263,7 @@ fn create_schema(c: &Connection) -> rusqlite::Result<()> {
       CREATE INDEX IF NOT EXISTS annotations_snapshot_id ON annotations(snapshot, id DESC);",
     )
 }
+#[cfg(unix)]
 fn corrupt_database(error: &rusqlite::Error) -> bool {
     matches!(
         error,
@@ -1286,11 +1271,13 @@ fn corrupt_database(error: &rusqlite::Error) -> bool {
             if matches!(inner.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
     )
 }
+#[cfg(unix)]
 struct Database {
     connection: Connection,
     #[cfg(unix)]
     _directory: fs::File,
 }
+#[cfg(unix)]
 impl Deref for Database {
     type Target = Connection;
 
@@ -1298,6 +1285,7 @@ impl Deref for Database {
         &self.connection
     }
 }
+#[cfg(unix)]
 fn database_path(root: &Path) -> PathBuf {
     relay_dir(root).join("evidence.sqlite")
 }
@@ -1309,10 +1297,6 @@ fn open_database(path: &Path) -> rusqlite::Result<Connection> {
             | OpenFlags::SQLITE_OPEN_CREATE
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
-}
-#[cfg(not(unix))]
-fn open_database(path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open(path)
 }
 #[cfg(unix)]
 fn quarantine_database(directory: &fs::File) -> Result<(), Box<dyn std::error::Error>> {
@@ -1343,26 +1327,6 @@ fn quarantine_database(directory: &fs::File) -> Result<(), Box<dyn std::error::E
     }
     Ok(())
 }
-#[cfg(not(unix))]
-fn quarantine_database(dir: &Path, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let suffix = format!(
-        "corrupt-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos()
-    );
-    fs::rename(path, dir.join(format!("evidence.sqlite.{suffix}")))?;
-    for sidecar in ["-wal", "-shm"] {
-        let sidecar_path = dir.join(format!("evidence.sqlite{sidecar}"));
-        if sidecar_path.exists() {
-            fs::rename(
-                &sidecar_path,
-                dir.join(format!("evidence.sqlite.{suffix}{sidecar}")),
-            )?;
-        }
-    }
-    Ok(())
-}
 #[cfg(unix)]
 fn recovered_db(root: &Path, directory: fs::File) -> Result<Database, Box<dyn std::error::Error>> {
     quarantine_database(&directory)?;
@@ -1376,21 +1340,6 @@ fn recovered_db(root: &Path, directory: fs::File) -> Result<Database, Box<dyn st
         connection: c,
         _directory: directory,
     })
-}
-#[cfg(not(unix))]
-fn recovered_db(
-    root: &Path,
-    dir: &Path,
-    path: &Path,
-) -> Result<Database, Box<dyn std::error::Error>> {
-    quarantine_database(dir, path)?;
-    let c = open_database(path)?;
-    create_schema(&c)?;
-    c.execute(
-        "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
-        params![snapshot(root)?],
-    )?;
-    Ok(Database { connection: c })
 }
 #[cfg(unix)]
 fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
@@ -1417,25 +1366,9 @@ fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
     }
 }
 #[cfg(not(unix))]
-fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
-    ensure_relay_directory(root, true)?;
-    let dir = relay_dir(root);
-    let path = dir.join("evidence.sqlite");
-    if fs::read(&path)
-        .ok()
-        .is_some_and(|bytes| !bytes.is_empty() && !bytes.starts_with(b"SQLite format 3\0"))
-    {
-        return recovered_db(root, &dir, &path);
-    }
-    let c = open_database(&path)?;
-    match create_schema(&c) {
-        Ok(()) => Ok(Database { connection: c }),
-        Err(error) if corrupt_database(&error) => {
-            drop(c);
-            recovered_db(root, &dir, &path)
-        }
-        Err(error) => Err(error.into()),
-    }
+fn db(_root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
+    Err("Relay managed state requires Unix descriptor-relative file operations; Windows is not supported"
+        .into())
 }
 fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let output = Command::new("git").args(args).current_dir(root).output()?;
