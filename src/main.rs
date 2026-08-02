@@ -1286,24 +1286,8 @@ impl Deref for Database {
     }
 }
 #[cfg(unix)]
-fn database_path(root: &Path, directory: &fs::File) -> PathBuf {
-    // Linux O_NOFOLLOW protects only the final component. Anchor SQLite's
-    // database and WAL/SHM sidecars to the already-open managed directory via
-    // procfs so a later .relay pathname swap cannot redirect the write.
-    #[cfg(target_os = "linux")]
-    {
-        PathBuf::from(format!(
-            "/proc/self/fd/{}/evidence.sqlite",
-            directory.as_raw_fd()
-        ))
-    }
-    // macOS rejects an intermediate symlink under O_NOFOLLOW; retain the
-    // normal path there (and the regression test below proves that behavior).
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = directory;
-        relay_dir(root).join("evidence.sqlite")
-    }
+fn database_path(root: &Path) -> PathBuf {
+    relay_dir(root).join("evidence.sqlite")
 }
 #[cfg(unix)]
 fn open_database(path: &Path) -> rusqlite::Result<Connection> {
@@ -1346,7 +1330,7 @@ fn quarantine_database(directory: &fs::File) -> Result<(), Box<dyn std::error::E
 #[cfg(unix)]
 fn recovered_db(root: &Path, directory: fs::File) -> Result<Database, Box<dyn std::error::Error>> {
     quarantine_database(&directory)?;
-    let c = open_database(&database_path(root, &directory))?;
+    let c = open_database(&database_path(root))?;
     create_schema(&c)?;
     c.execute(
         "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
@@ -1368,7 +1352,7 @@ fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
     {
         return recovered_db(root, directory);
     }
-    let c = open_database(&database_path(root, &directory))?;
+    let c = open_database(&database_path(root))?;
     match create_schema(&c) {
         Ok(()) => Ok(Database {
             connection: c,
@@ -2206,7 +2190,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn database_stays_safe_after_managed_directory_path_swap() {
+    fn database_refuses_a_directory_symlink_after_managed_directory_open() {
         use std::os::unix::fs::symlink;
 
         let root = env::temp_dir().join(format!(
@@ -2231,13 +2215,7 @@ mod tests {
         fs::rename(relay_dir(&root), &original).unwrap();
         symlink(&outside, relay_dir(&root)).unwrap();
 
-        let result = open_database(&database_path(&root, &directory));
-        #[cfg(target_os = "linux")]
-        assert!(result.is_ok());
-        #[cfg(not(target_os = "linux"))]
-        assert!(result.is_err());
-        drop(result);
-        assert!(original.join("evidence.sqlite").exists() || !cfg!(target_os = "linux"));
+        assert!(open_database(&database_path(&root)).is_err());
         assert!(!outside.join("evidence.sqlite").exists());
         drop(directory);
         fs::remove_dir_all(root).unwrap();

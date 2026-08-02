@@ -36,3 +36,10 @@
 No material blockers remain.
 
 APPROVE
+
+## Invalidation
+
+The approval is snapshot-bound and was invalidated by Ubuntu release CI run
+`30740752532`: SQLite rejected `/proc/self/fd/<dirfd>` under
+`SQLITE_OPEN_NOFOLLOW` (`SQLITE_CANTOPEN_SYMLINK`). The associated source change
+was reverted before release.
