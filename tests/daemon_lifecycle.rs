@@ -658,7 +658,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     fs::write(root.join("tracked.txt"), "first").expect("first burst write");
     fs::write(root.join("tracked.txt"), "second").expect("second burst write");
     let mut resume_text = String::new();
-    for _ in 0..24 {
+    for _ in 0..48 {
         let resume = run(&root, &["resume"]);
         assert!(resume.status.success());
         resume_text = String::from_utf8_lossy(&resume.stdout).into_owned();
