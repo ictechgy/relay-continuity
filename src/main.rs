@@ -1695,7 +1695,11 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
             // the stop acknowledgement budget without needless wakeups.
             .unwrap_or(Duration::from_millis(500));
         match rx.recv_timeout(timeout) {
-            Ok(Ok(event)) if event_is_relevant(root, &event) => pending = Some(Instant::now()),
+            // Keep the first event's deadline. Repeated relevant events must
+            // coalesce into one capture, not postpone it indefinitely.
+            Ok(Ok(event)) if event_is_relevant(root, &event) => {
+                pending.get_or_insert_with(Instant::now);
+            }
             // Ignored events can arrive continuously (for example a generated
             // directory). They must not prevent an earlier relevant change
             // from reaching its debounce deadline.
