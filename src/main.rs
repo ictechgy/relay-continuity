@@ -1508,7 +1508,10 @@ fn safe_path(path: &str) -> String {
 }
 fn ignored(root: &Path, path: &str) -> bool {
     let defaults = [".env", ".pem", "id_rsa", "target/", ".relay/", ".git/"];
-    if defaults.iter().any(|p| path.contains(p)) {
+    if defaults
+        .iter()
+        .any(|pattern| path == pattern.trim_end_matches('/') || path.contains(pattern))
+    {
         return true;
     }
     fs::read_to_string(root.join(".relayignore"))
@@ -2066,6 +2069,8 @@ mod tests {
     #[test]
     fn default_ignores_secret_paths() {
         assert!(ignored(Path::new("."), "config/.env.local"));
+        assert!(ignored(Path::new("."), ".relay"));
+        assert!(ignored(Path::new("."), ".git"));
     }
     #[test]
     fn owned_config_patch_preserves_foreign_secret_bytes_without_backup() {
