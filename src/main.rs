@@ -36,9 +36,6 @@ fn integration_manifest_path(root: &Path, provider: &str) -> PathBuf {
 fn integration_owned_path(root: &Path, provider: &str) -> PathBuf {
     integration_dir(root).join(format!("{provider}.owned"))
 }
-fn codex_hook_path(root: &Path) -> PathBuf {
-    root.join(".codex/hooks.json")
-}
 fn ensure_managed_directory(
     root: &Path,
     components: &[&str],
@@ -421,6 +418,11 @@ fn read_managed_file(
     }
     Ok(fs::read(path.join(file_name))?)
 }
+fn is_not_found(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
 #[cfg(unix)]
 fn remove_managed_file(
     root: &Path,
@@ -544,7 +546,7 @@ fn codex_hook_matches_manifest(
     let Some(expected) = values.get("hook_hash") else {
         return false;
     };
-    fs::read(codex_hook_path(root))
+    read_managed_file(root, &[".codex"], "hooks.json")
         .map(|bytes| hash(&bytes) == *expected)
         .unwrap_or(false)
 }
@@ -553,12 +555,17 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
         return Err("Relay rejected an unsupported integration provider".into());
     }
     ensure_integration_directory(root, false)?;
-    let path = integration_manifest_path(root, provider);
-    if !path.exists() {
-        return Ok("disabled".into());
-    }
-    let Ok(text) = fs::read_to_string(path) else {
-        return Ok("broken".into());
+    let text = match read_managed_file(
+        root,
+        &[".relay", "integrations"],
+        &format!("{provider}.state"),
+    ) {
+        Err(error) if is_not_found(error.as_ref()) => return Ok("disabled".into()),
+        Err(_) => return Ok("broken".into()),
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(_) => return Ok("broken".into()),
+        },
     };
     let values = text
         .lines()
@@ -579,7 +586,11 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
                 return Ok(state.into());
             }
             let root_hash = hash(root.to_string_lossy().as_bytes());
-            let Ok(owned) = fs::read(integration_owned_path(root, provider)) else {
+            let Ok(owned) = read_managed_file(
+                root,
+                &[".relay", "integrations"],
+                &format!("{provider}.owned"),
+            ) else {
                 return Ok("drifted".into());
             };
             let owned_values = String::from_utf8(owned.clone()).ok().map(|text| {
@@ -614,7 +625,11 @@ fn integration_manifest_values(
     provider: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Box<dyn std::error::Error>> {
     ensure_integration_directory(root, false)?;
-    let text = fs::read_to_string(integration_manifest_path(root, provider))?;
+    let text = String::from_utf8(read_managed_file(
+        root,
+        &[".relay", "integrations"],
+        &format!("{provider}.state"),
+    )?)?;
     Ok(text
         .lines()
         .filter_map(|line| line.split_once('='))
@@ -640,7 +655,11 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         return Ok(());
     };
     let root_hash = hash(root.to_string_lossy().as_bytes());
-    let Ok(owned) = fs::read(integration_owned_path(root, provider)) else {
+    let Ok(owned) = read_managed_file(
+        root,
+        &[".relay", "integrations"],
+        &format!("{provider}.owned"),
+    ) else {
         println!("Relay unavailable: {provider} integration unavailable");
         return Ok(());
     };
@@ -701,10 +720,9 @@ fn codex_owned_state(state: &str, hook_bytes: &[u8]) -> Vec<u8> {
 fn codex_hook_preflight(root: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     ensure_codex_directory(root, false)?;
     let desired = codex_hook_config(root)?;
-    let path = codex_hook_path(root);
-    match fs::read(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(desired),
-        Err(error) => Err(error.into()),
+    match read_managed_file(root, &[".codex"], "hooks.json") {
+        Err(error) if is_not_found(error.as_ref()) => Ok(desired),
+        Err(error) => Err(error),
         Ok(current) if current == desired => Ok(desired),
         Ok(_) => Err(
             "Relay refuses to overwrite an existing Codex hooks.json; no file was changed".into(),
@@ -718,9 +736,9 @@ fn codex_manifest_matches_or_is_missing(
     hook: &[u8],
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let expected = integration_manifest_bytes(root, "codex", state, owned, Some(hook))?;
-    match fs::read(integration_manifest_path(root, "codex")) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(error) => Err(error.into()),
+    match read_managed_file(root, &[".relay", "integrations"], "codex.state") {
+        Err(error) if is_not_found(error.as_ref()) => Ok(true),
+        Err(error) => Err(error),
         // Current Relay writes complete manifests atomically. Only an exact
         // prior manifest is trustworthy; a missing file is handled as a
         // narrowly-scoped legacy recovery case by its callers.
@@ -728,7 +746,7 @@ fn codex_manifest_matches_or_is_missing(
     }
 }
 fn codex_owned_state_name(root: &Path, hook: &[u8]) -> Option<&'static str> {
-    let owned = fs::read(integration_owned_path(root, "codex")).ok()?;
+    let owned = read_managed_file(root, &[".relay", "integrations"], "codex.owned").ok()?;
     if owned == codex_owned_state("awaiting_trust", hook) {
         Some("awaiting_trust")
     } else if owned == codex_owned_state("ready", hook) {
@@ -750,18 +768,17 @@ fn codex_owned_provenance(root: &Path, hook: &[u8]) -> bool {
     {
         return false;
     }
-    fs::read(integration_owned_path(root, "codex"))
+    read_managed_file(root, &[".relay", "integrations"], "codex.owned")
         .map(|owned| owned == codex_owned_state(state, hook))
         .unwrap_or(false)
 }
 fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let hook = codex_hook_config(root)?;
-    let hook_path = codex_hook_path(root);
     ensure_codex_directory(root, false)?;
     ensure_integration_directory(root, false)?;
     let integration_existed = integration_dir(root).is_dir();
-    match fs::read(&hook_path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    match read_managed_file(root, &[".codex"], "hooks.json") {
+        Err(error) if is_not_found(error.as_ref()) => {
             ensure_codex_directory(root, true)?;
             ensure_integration_directory(root, true)?;
             let owned = codex_owned_state("awaiting_trust", &hook);
@@ -771,7 +788,7 @@ fn codex_install(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             atomic_replace_managed(root, &[".codex"], "hooks.json", &hook)?;
             write_codex_manifest(root, "awaiting_trust", &owned, &hook)
         }
-        Err(error) => Err(error.into()),
+        Err(error) => Err(error),
         Ok(current) if current == hook && codex_owned_provenance(root, &hook) => Ok(()),
         Ok(current)
             if current == hook
@@ -827,7 +844,8 @@ fn codex_mark_trusted(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             let manifest_is_ready =
                 integration_manifest_bytes(root, "codex", "ready", &ready, Some(&hook)).is_ok_and(
                     |expected| {
-                        fs::read(integration_manifest_path(root, "codex")).ok() == Some(expected)
+                        read_managed_file(root, &[".relay", "integrations"], "codex.state").ok()
+                            == Some(expected)
                     },
                 );
             if manifest_is_ready {
@@ -2234,6 +2252,39 @@ mod tests {
 
         assert!(db(&root).is_err());
         assert_eq!(fs::read_to_string(&target).unwrap(), "PRECIOUS");
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_dir_all(outside).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn database_refuses_a_directory_symlink_after_managed_directory_open() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!(
+            "relay-database-directory-symlink-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let outside = env::temp_dir().join(format!(
+            "relay-database-directory-symlink-outside-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let directory = managed_directory_no_follow(&root, &[".relay"], false).unwrap();
+        let original = root.join(".relay-opened");
+        fs::rename(relay_dir(&root), &original).unwrap();
+        symlink(&outside, relay_dir(&root)).unwrap();
+
+        assert!(open_database(&database_path(&root)).is_err());
+        assert!(!outside.join("evidence.sqlite").exists());
+        drop(directory);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
