@@ -1698,6 +1698,21 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
             .unwrap_or(Duration::from_millis(500));
         match rx.recv_timeout(timeout) {
             Ok(Ok(event)) if event_is_relevant(root, &event) => pending = Some(Instant::now()),
+            // Ignored events can arrive continuously (for example a generated
+            // directory). They must not prevent an earlier relevant change
+            // from reaching its debounce deadline.
+            Ok(Ok(_)) | Ok(Err(_))
+                if pending
+                    .is_some_and(|changed| changed.elapsed() >= Duration::from_millis(750)) =>
+            {
+                pending = None;
+                if let Err(error) = observe(root, c)
+                    && !writer_busy(error.as_ref())
+                {
+                    return Err(error);
+                }
+                last_reconcile = Instant::now();
+            }
             // Relay's own ignored writes can keep the watcher busy. Preserve
             // the periodic Git reconciliation even when they arrive faster
             // than the receive timeout.
