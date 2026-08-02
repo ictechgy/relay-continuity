@@ -1,0 +1,48 @@
+language: "en-US"
+tone_instructions: "Be concise and evidence-based. Report only actionable findings with file and line references."
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  review_details: false
+  changed_files_summary: true
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  poem: false
+  enable_prompt_for_ai_agents: false
+  path_filters:
+    - "!target/**"
+    - "**/Cargo.lock"
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: >-
+        Treat filesystem and SQLite changes as security-sensitive. Check symlink,
+        TOCTOU, path traversal, descriptor lifetime, atomicity, permissions,
+        error handling, and cross-platform behavior. Relay must remain local-only:
+        do not persist source bodies, diffs, chats, telemetry, or raw command output.
+        Prefer a failing regression test for every security boundary change.
+    - path: "tests/**/*.rs"
+      instructions: >-
+        Verify tests exercise the real CLI or filesystem boundary, clean up their
+        state, and do not become timing-dependent or weaken security assertions.
+    - path: ".github/workflows/**"
+      instructions: >-
+        Review release integrity: locked dependency builds, test coverage, least
+        privilege permissions, immutable action references, and artifact checksums.
+    - path: "{README.md,SECURITY.md}"
+      instructions: >-
+        Ensure privacy, supported-platform, and security claims exactly match the
+        implementation; flag overclaims and unsafe operational guidance.
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+
+chat:
+  auto_reply: true
