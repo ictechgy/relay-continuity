@@ -29,6 +29,17 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo build --release --locked
+      - name: Validate distribution scripts
+        run: |
+          node --check packages/relay/bin/relay.js
+          node --check scripts/package-npm.mjs
+          node --check scripts/render-homebrew-formula.mjs
+          node scripts/render-homebrew-formula.mjs \
+            --version 0.2.0-rc.5 \
+            --macos-arm64 0000000000000000000000000000000000000000000000000000000000000000 \
+            --macos-x64 1111111111111111111111111111111111111111111111111111111111111111 \
+            --linux-x64 2222222222222222222222222222222222222222222222222222222222222222 \
+            | ruby -c /dev/stdin
 
   audit:
     needs: test

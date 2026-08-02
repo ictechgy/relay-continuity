@@ -5,7 +5,7 @@ It records Git snapshots and explicit check outcomes locally, then renders a sma
 resume card. It does not store source bodies, raw diffs, chats, telemetry, or
 raw command output.
 
-> v0.2.0-rc.4 is a prerelease. It is not a transcript recovery tool and
+> v0.2.0-rc.5 is a prerelease. It is not a transcript recovery tool and
 > cannot universally observe an AI tool's quota, internal reasoning, or UI.
 
 ## Trust model
@@ -17,8 +17,23 @@ raw command output.
 
 ## Quick start
 
-Relay currently supports macOS and Linux. Install Rust 1.97.1 with `rustup`,
-then build Relay from this repository:
+Relay currently supports macOS and Linux. The easiest installation route is a
+prebuilt binary selected for your platform by npm:
+
+```sh
+npm install --global @ictechgy/relay
+```
+
+Homebrew users can install the same verified release binary from the official
+tap:
+
+```sh
+brew install ictechgy/tap/relay
+```
+
+Release binaries are currently unsigned prereleases. Verify their SHA-256
+checksums before bypassing any platform warning. For development or a source
+install, use Rust 1.97.1 with `rustup`:
 
 ```sh
 git clone https://github.com/ictechgy/relay-continuity.git
@@ -51,9 +66,10 @@ relay integration status
 ```
 
 These steps are repository-scoped and reversible. They do not read a chat,
-detect a quota limit, start another AI, or upload data. Before using a future
-GitHub Release binary, verify its SHA-256 checksum against the checksum artifact
-published for the same tag.
+detect a quota limit, start another AI, or upload data. Before using a GitHub
+Release binary directly, verify its SHA-256 checksum against the checksum
+artifact published for the same tag. npm and Homebrew package only these same
+platform-specific release binaries.
 
 ## Development
 

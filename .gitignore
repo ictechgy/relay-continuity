@@ -1,4 +1,5 @@
 /target/
+/dist/
 /.relay/
 /.omc/
 /.codex/hooks.json

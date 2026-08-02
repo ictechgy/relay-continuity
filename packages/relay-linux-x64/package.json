@@ -1,0 +1,10 @@
+{
+  "name": "@ictechgy/relay-linux-x64",
+  "version": "0.2.0-rc.5",
+  "description": "Relay native binary for Linux x86_64",
+  "license": "MIT",
+  "repository": "https://github.com/ictechgy/relay-continuity",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/relay"]
+}

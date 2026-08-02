@@ -1,0 +1,10 @@
+{
+  "name": "@ictechgy/relay-darwin-x64",
+  "version": "0.2.0-rc.5",
+  "description": "Relay native binary for macOS Intel",
+  "license": "MIT",
+  "repository": "https://github.com/ictechgy/relay-continuity",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/relay"]
+}

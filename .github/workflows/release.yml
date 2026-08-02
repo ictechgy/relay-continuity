@@ -33,3 +33,41 @@ jobs:
           path: |
             relay-${{ matrix.asset }}
             relay-${{ matrix.asset }}.sha256
+  npm-packages:
+    needs: archive
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: relay-*
+          path: release-assets
+      - name: Package npm distribution
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          node scripts/package-npm.mjs --artifacts release-assets --output dist/npm --version "$version"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-packages
+          path: |
+            dist/npm/tarballs
+            dist/npm/publish-order.txt
+  npm-publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag' && vars.PUBLISH_NPM == 'true'
+    needs: npm-packages
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-packages
+          path: npm-packages
+      - name: Publish platform packages before the wrapper
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          while IFS= read -r package; do
+            npm publish "npm-packages/tarballs/$package" --access public --provenance
+          done < npm-packages/publish-order.txt

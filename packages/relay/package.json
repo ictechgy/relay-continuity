@@ -1,0 +1,24 @@
+{
+  "name": "@ictechgy/relay",
+  "version": "0.2.0-rc.5",
+  "description": "Local, evidence-first continuity for AI-assisted software work",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ictechgy/relay-continuity.git"
+  },
+  "bin": {
+    "relay": "bin/relay.js"
+  },
+  "files": [
+    "bin/relay.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@ictechgy/relay-darwin-arm64": "0.2.0-rc.5",
+    "@ictechgy/relay-darwin-x64": "0.2.0-rc.5",
+    "@ictechgy/relay-linux-x64": "0.2.0-rc.5"
+  }
+}
