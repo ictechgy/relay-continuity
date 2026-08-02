@@ -33,8 +33,10 @@ process.stdout.write(`class Relay < Formula
   end
 
   on_linux do
-    url "${base}/relay-linux-x86_64"
-    sha256 "${args["linux-x64"]}"
+    on_intel do
+      url "${base}/relay-linux-x86_64"
+      sha256 "${args["linux-x64"]}"
+    end
   end
 
   def install
