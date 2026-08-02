@@ -3,7 +3,7 @@
 Relay distributes the same tagged native release binaries through three routes:
 
 - GitHub Releases: direct download with a SHA-256 file.
-- npm: `@ictechgy/relay` selects a platform package without compiling Rust.
+- npm: `@ictechgy/relay@next` selects a platform package without compiling Rust.
 - Homebrew: `ictechgy/tap/relay` downloads the architecture-specific GitHub
   Release binary and verifies its Formula checksum.
 
@@ -19,12 +19,13 @@ published last so npm can resolve its exact optional dependencies.
 
 Set an `NPM_TOKEN` repository secret and set the repository variable
 `PUBLISH_NPM` to `true` only after configuring the `@ictechgy` npm scope for
-public publishing. The tag workflow then publishes with provenance enabled.
+public publishing. The tag workflow then publishes prereleases with provenance
+enabled under npm's `next` dist-tag.
 
 If publication is intentionally disabled, download the `npm-packages` workflow
-artifact, publish the three `relay-*` platform tarballs with `--access public`,
-then publish the `relay` wrapper tarball. Never publish a tarball whose version
-does not equal the release tag version.
+artifact, publish the three `relay-*` platform tarballs with `--access public
+--tag next`, then publish the `relay` wrapper tarball with the same tag. Never
+publish a tarball whose version does not equal the release tag version.
 
 ## Updating the Homebrew tap
 

@@ -69,5 +69,5 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           while IFS= read -r package; do
-            npm publish "npm-packages/tarballs/$package" --access public --provenance
+            npm publish "npm-packages/tarballs/$package" --access public --provenance --tag next
           done < npm-packages/publish-order.txt

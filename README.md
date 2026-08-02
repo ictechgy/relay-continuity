@@ -21,7 +21,7 @@ Relay currently supports macOS and Linux. The easiest installation route is a
 prebuilt binary selected for your platform by npm:
 
 ```sh
-npm install --global @ictechgy/relay
+npm install --global @ictechgy/relay@next
 ```
 
 Homebrew users can install the same verified release binary from the official

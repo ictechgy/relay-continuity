@@ -3,7 +3,7 @@
 Install Relay without a Rust toolchain:
 
 ```sh
-npm install --global @ictechgy/relay
+npm install --global @ictechgy/relay@next
 ```
 
 The package selects a verified native binary for macOS Apple Silicon, macOS
