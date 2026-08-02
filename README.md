@@ -15,6 +15,46 @@ raw command output.
 - `BROKEN`: the most recent recorded check failed.
 - `UNKNOWN`: Relay has no evidence for the claim.
 
+## Quick start
+
+Relay currently supports macOS and Linux. Install Rust 1.97.1 with `rustup`,
+then build Relay from this repository:
+
+```sh
+git clone https://github.com/ictechgy/relay-continuity.git
+cd relay-continuity
+cargo build --release --locked
+mkdir -p "$HOME/.local/bin"
+install -m 755 target/release/relay "$HOME/.local/bin/relay"
+```
+
+Ensure `$HOME/.local/bin` is on your `PATH`, then initialize the current Git
+repository you want Relay to observe and inspect the first card:
+
+```sh
+cd /path/to/your/project
+relay init
+relay status
+relay resume
+```
+
+To enable automatic capture, preview and install the template for your platform
+with the commands in [Local capture service](#local-capture-service), then
+enable that exact template with your user service manager. To inject the bounded
+card automatically in Codex, install and explicitly trust the repository hook:
+
+```sh
+relay integration codex plan
+relay integration codex install --apply
+relay integration codex trust --apply
+relay integration status
+```
+
+These steps are repository-scoped and reversible. They do not read a chat,
+detect a quota limit, start another AI, or upload data. Before using a future
+GitHub Release binary, verify its SHA-256 checksum against the checksum artifact
+published for the same tag.
+
 ## Development
 
 `cargo test` runs the local test suite. The project is local-only by design.
