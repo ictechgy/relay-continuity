@@ -42,7 +42,7 @@
   },
   "releaseBoundary": {
     "repository": "https://github.com/ictechgy/relay-continuity",
-    "version": "0.2.0-rc.1",
+    "version": "0.2.0-rc.2",
     "tagAndRelease": "not-created",
     "requiredBeforePublishing": "Review the tagged workflow artifacts and SHA-256 checksums."
   },
