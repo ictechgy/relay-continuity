@@ -884,6 +884,20 @@ fn systemd_quote(value: &str) -> String {
         value.replace(char::from(92), r"\\").replace('"', r#"\""#)
     )
 }
+fn systemd_working_directory(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| match character {
+            ' ' => r"\x20".into(),
+            '\t' => r"\x09".into(),
+            '\n' => r"\x0a".into(),
+            '\\' => r"\\".into(),
+            '"' => r"\x22".into(),
+            '%' => "%%".into(),
+            character => character.to_string(),
+        })
+        .collect()
+}
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
@@ -903,7 +917,7 @@ fn service_template(root: &Path, kind: &str) -> Result<String, Box<dyn std::erro
         ),
         "systemd" => format!(
             "[Unit]\nDescription=Relay local evidence daemon ({label})\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart={} integration service run\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
-            systemd_quote(&working_directory),
+            systemd_working_directory(&working_directory),
             systemd_quote(&executable)
         ),
         _ => unreachable!(),
@@ -2255,14 +2269,14 @@ mod tests {
     }
     #[test]
     fn service_templates_are_root_scoped_and_escape_worktree_paths() {
-        let root = Path::new("/tmp/relay & <worktree>");
+        let root = Path::new("/tmp/relay & <worktree>%h");
         let launchd = service_template(root, "launchd").unwrap();
         let systemd = service_template(root, "systemd").unwrap();
         assert!(launchd.contains("relay-"));
         assert!(launchd.contains("relay &amp; &lt;worktree&gt;"));
         assert!(launchd.contains("integration</string><string>service</string><string>run"));
         assert!(launchd.contains("<key>SuccessfulExit</key><false/>"));
-        assert!(systemd.contains("WorkingDirectory=\"/tmp/relay & <worktree>\""));
+        assert!(systemd.contains("WorkingDirectory=/tmp/relay\\x20&\\x20<worktree>%%h"));
         assert!(systemd.contains("Restart=on-failure"));
         assert!(service_template(root, "unsupported").is_err());
     }
