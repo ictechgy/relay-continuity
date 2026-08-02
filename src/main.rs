@@ -1662,10 +1662,8 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 fn event_is_relevant(root: &Path, event: &Event) -> bool {
     event.paths.iter().any(|path| {
-        path.strip_prefix(root).ok().is_none_or(|relative| {
-            let relative = relative.to_string_lossy();
-            !ignored(root, &relative)
-        })
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        !ignored(root, &relative.to_string_lossy())
     })
 }
 fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn std::error::Error>> {
