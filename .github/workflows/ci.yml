@@ -35,7 +35,7 @@ jobs:
           node --check scripts/package-npm.mjs
           node --check scripts/render-homebrew-formula.mjs
           node scripts/render-homebrew-formula.mjs \
-            --version 0.2.0-rc.5 \
+            --version 0.2.0-rc.6 \
             --macos-arm64 0000000000000000000000000000000000000000000000000000000000000000 \
             --macos-x64 1111111111111111111111111111111111111111111111111111111111111111 \
             --linux-x64 2222222222222222222222222222222222222222222222222222222222222222 \
