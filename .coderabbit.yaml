@@ -18,7 +18,16 @@ reviews:
   enable_prompt_for_ai_agents: false
   path_filters:
     - "!target/**"
-    - "**/Cargo.lock"
+    - ".github/workflows/**"
+    - ".omx/**"
+    - "src/**"
+    - "tests/**"
+    - "Cargo.toml"
+    - "Cargo.lock"
+    - "README.md"
+    - "SECURITY.md"
+    - "CONTRIBUTING.md"
+    - ".coderabbit.yaml"
   path_instructions:
     - path: "src/**/*.rs"
       instructions: >-
