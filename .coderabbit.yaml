@@ -18,6 +18,7 @@ reviews:
   enable_prompt_for_ai_agents: false
   path_filters:
     - "!target/**"
+    - "**/Cargo.lock"
   path_instructions:
     - path: "src/**/*.rs"
       instructions: >-
