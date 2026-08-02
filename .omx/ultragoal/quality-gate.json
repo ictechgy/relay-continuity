@@ -1,1 +1,53 @@
-{"runtimeMode":"CODEX_APP_DEGRADED_NO_OMX","omxAvailable":false,"status":"complete","reviewSnapshot":"75b55126d710ae8062be9578807040683fa41532","priorCompletedRelease":{"version":"v0.1","reviewSnapshot":"855670702d7f4eb79e30b9ad5aa806cc4d77ed5a","verdicts":{"code":"APPROVE","architecture":"CLEAR"}},"plan":".omx/plans/relay-auto-integration-v02-20260801T110348Z.md","consensusHandoff":".omx/state/relay-auto-integration-v02-20260801T110348Z-handoff.json","verification":{"format":"cargo +stable fmt --check","check":"cargo +stable check --locked","tests":"26 passed","builds":["cargo +stable build --locked","cargo +stable build --release --locked"],"diff":"git diff --check","clippy":"unavailable: cargo-clippy is not installed for stable-aarch64-apple-darwin"},"cleanup":{"scope":["src/main.rs","tests/daemon_lifecycle.rs","README.md"],"fallbackFindings":"grounded fail-closed compatibility boundaries retained; no masking fallback found","change":"replaced card write panics with atomic error propagation and bounded unavailable emission"},"invariantAudit":{"localOnly":true,"foreignConfigOwnership":true,"quotaOrUiAutomation":false,"canonicalGitRoot":true,"subagentInjection":false,"providerReadinessFailClosed":true},"verdicts":{"code":"APPROVE","architecture":"CLEAR"},"remainingBlockers":["Public GitHub remote, release tag, and publication remain deferred pending explicit repository owner/name and release authority."],"nextAction":"Await explicit repository owner/name and release authority before publishing."}
+{
+  "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
+  "omxAvailable": false,
+  "status": "complete",
+  "implementationReview": {
+    "snapshot": "75b55126d710ae8062be9578807040683fa41532",
+    "verdicts": {
+      "code": "APPROVE",
+      "architecture": "CLEAR"
+    }
+  },
+  "latestMaintenanceEvidence": {
+    "snapshot": "b469f729f21538fa7ab8470e5278bb9199abd6df",
+    "recordedAt": "2026-08-02",
+    "scope": [
+      "pinned CI actions and least-privilege workflow permissions",
+      "macOS and Linux quality gates",
+      "Linux RustSec advisory audit",
+      "source-install Quick Start"
+    ],
+    "localVerification": {
+      "format": "cargo fmt --check",
+      "check": "cargo check --all-targets --locked",
+      "tests": "33 passed",
+      "clippy": "cargo clippy --all-targets --all-features --locked -- -D warnings",
+      "releaseBuild": "cargo build --release --locked",
+      "audit": "cargo audit --deny warnings",
+      "diff": "git diff --check"
+    },
+    "preChangeMainCi": {
+      "snapshot": "7add4925b73a46594d0563166aaf9325091a983f",
+      "run": "https://github.com/ictechgy/relay-continuity/actions/runs/30743183422",
+      "jobs": {
+        "macos": "success",
+        "ubuntu": "success"
+      }
+    },
+    "limits": [
+      "The changed CI workflow must pass on its own pull request before merge.",
+      "Local verification does not prove service-manager or provider-hook behavior on another user's machine."
+    ]
+  },
+  "releaseBoundary": {
+    "repository": "https://github.com/ictechgy/relay-continuity",
+    "version": "0.2.0-rc.1",
+    "tagAndRelease": "not-created",
+    "requiredBeforePublishing": "Review the tagged workflow artifacts and SHA-256 checksums."
+  },
+  "remainingProductLimits": [
+    "Claude and Grok automatic context injection remain unavailable until their installed, authenticated hook contracts prove safe.",
+    "Windows managed-state operations remain intentionally unsupported."
+  ]
+}
