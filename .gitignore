@@ -1,4 +1,6 @@
 /target/
 /.relay/
+/.omc/
+/.codex/hooks.json
 .env
 .env.*
