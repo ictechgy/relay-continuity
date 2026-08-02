@@ -1,6 +1,8 @@
 use rusqlite::Connection;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::{
     fs,
     io::Write,
@@ -13,6 +15,28 @@ use std::{
 #[cfg(unix)]
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+#[cfg(unix)]
+fn state_database(root: &Path) -> PathBuf {
+    let root = fs::canonicalize(root).expect("canonical root");
+    let base = std::env::var_os("RELAY_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                PathBuf::from(std::env::var_os("HOME").expect("HOME"))
+                    .join("Library/Application Support")
+            } else {
+                std::env::var_os("XDG_STATE_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| {
+                        PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".local/state")
+                    })
+            }
+        });
+    base.join("relay")
+        .join(sha256(root.as_os_str().as_bytes()))
+        .join("evidence.sqlite")
 }
 
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
@@ -142,7 +166,7 @@ fn nested_invocation_uses_the_canonical_git_root() {
     fs::create_dir_all(&nested).expect("create nested directory");
     let initialized = run_from(&nested, &["init"]);
     assert!(initialized.status.success());
-    assert!(root.join(".relay/evidence.sqlite").exists());
+    assert!(state_database(&root).exists());
     assert!(!nested.join(".relay").exists());
     assert!(run_from(&nested, &["daemon", "start"]).status.success());
     assert!(run(&root, &["daemon", "status"]).status.success());
@@ -645,7 +669,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     }
     assert!(resume_text.contains("STATUS: FRESH"), "{resume_text}");
 
-    let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("open evidence");
+    let database = Connection::open(state_database(&root)).expect("open evidence");
     let event_count: i64 = database
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count events");
@@ -691,8 +715,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let mut transition_seen = false;
     for _ in 0..24 {
         let resume = run(&root, &["resume"]);
-        let database =
-            Connection::open(root.join(".relay/evidence.sqlite")).expect("read transition");
+        let database = Connection::open(state_database(&root)).expect("read transition");
         let head_events: i64 = database
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind='head-change'",
@@ -722,8 +745,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let mut branch_seen = false;
     for _ in 0..24 {
         let resume = run(&root, &["resume"]);
-        let database =
-            Connection::open(root.join(".relay/evidence.sqlite")).expect("read branch event");
+        let database = Connection::open(state_database(&root)).expect("read branch event");
         let branch_events: i64 = database
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind='branch-change'",
@@ -777,7 +799,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let broken = run(&root, &["record-check", "1", "deploy --token top-secret"]);
     assert!(broken.status.success());
     assert!(String::from_utf8_lossy(&broken.stdout).contains("STATUS: BROKEN"));
-    let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("reopen evidence");
+    let database = Connection::open(state_database(&root)).expect("reopen evidence");
     let command: String = database
         .query_row(
             "SELECT command FROM checks ORDER BY id DESC LIMIT 1",
@@ -809,8 +831,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
         "{}",
         String::from_utf8_lossy(&note.stderr)
     );
-    let database_bytes =
-        fs::read(root.join(".relay/evidence.sqlite")).expect("read evidence bytes");
+    let database_bytes = fs::read(state_database(&root)).expect("read evidence bytes");
     assert!(
         !String::from_utf8_lossy(&database_bytes).contains("operator-secret-should-never-persist")
     );
@@ -819,8 +840,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .expect("read note card")
             .contains("operator-secret-should-never-persist")
     );
-    let database =
-        Connection::open(root.join(".relay/evidence.sqlite")).expect("count adapter baseline");
+    let database = Connection::open(state_database(&root)).expect("count adapter baseline");
     let before_adapter_events: i64 = database
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count adapter baseline events");
@@ -831,21 +851,19 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     );
     assert!(!malformed.status.success());
     assert!(!String::from_utf8_lossy(&malformed.stderr).contains("malformed-secret-payload"));
-    let database =
-        Connection::open(root.join(".relay/evidence.sqlite")).expect("count adapter result");
+    let database = Connection::open(state_database(&root)).expect("count adapter result");
     let after_adapter_events: i64 = database
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count adapter result events");
     assert_eq!(after_adapter_events, before_adapter_events);
     drop(database);
     assert!(
-        !fs::read(root.join(".relay/evidence.sqlite"))
+        !fs::read(state_database(&root))
             .expect("read adapter evidence")
             .windows(b"malformed-secret-payload".len())
             .any(|bytes| bytes == b"malformed-secret-payload")
     );
-    let all_evidence =
-        fs::read(root.join(".relay/evidence.sqlite")).expect("read privacy evidence");
+    let all_evidence = fs::read(state_database(&root)).expect("read privacy evidence");
     for secret in [
         b"top-secret".as_slice(),
         b"eyJfake.jwt.output.secret".as_slice(),
@@ -861,8 +879,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     }
     let adapter = run(&root, &["adapter", "codex", "checkpoint"]);
     assert!(adapter.status.success());
-    let database =
-        Connection::open(root.join(".relay/evidence.sqlite")).expect("read typed adapter");
+    let database = Connection::open(state_database(&root)).expect("read typed adapter");
     let metadata_hash: String = database
         .query_row(
             "SELECT metadata_hash FROM adapter_metadata ORDER BY id DESC LIMIT 1",
@@ -900,7 +917,7 @@ fn nul_porcelain_preserves_space_paths_without_storing_source_content() {
     assert!(run(&root, &["init"]).status.success());
     fs::write(root.join("work item.txt"), "private source body").expect("space path write");
     assert!(run(&root, &["observe"]).status.success());
-    let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("open evidence");
+    let database = Connection::open(state_database(&root)).expect("open evidence");
     let path: String = database
         .query_row(
             "SELECT path FROM event_paths ORDER BY id DESC LIMIT 1",
@@ -909,7 +926,7 @@ fn nul_porcelain_preserves_space_paths_without_storing_source_content() {
         )
         .expect("read safe path");
     assert_eq!(path, "work item.txt");
-    let bytes = fs::read(root.join(".relay/evidence.sqlite")).expect("read evidence");
+    let bytes = fs::read(state_database(&root)).expect("read evidence");
     assert!(!String::from_utf8_lossy(&bytes).contains("private source body"));
     fs::remove_dir_all(root).expect("remove fixture");
 }
@@ -938,8 +955,7 @@ fn daemon_restart_reconciles_work_queued_before_an_abrupt_exit() {
     let mut recovered = false;
     for _ in 0..24 {
         let resume = run(&root, &["resume"]);
-        let database =
-            Connection::open(root.join(".relay/evidence.sqlite")).expect("open recovered evidence");
+        let database = Connection::open(state_database(&root)).expect("open recovered evidence");
         let dirty_events: i64 = database
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE kind='dirty-set'",
@@ -965,7 +981,7 @@ fn daemon_restart_reconciles_work_queued_before_an_abrupt_exit() {
 fn a_live_writer_lock_rejects_a_second_process_without_writing_evidence() {
     let root = git_fixture("writer-lock-test");
     assert!(run(&root, &["init"]).status.success());
-    let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("open evidence");
+    let database = Connection::open(state_database(&root)).expect("open evidence");
     let before: i64 = database
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count baseline events");
@@ -978,7 +994,7 @@ fn a_live_writer_lock_rejects_a_second_process_without_writing_evidence() {
     let second_writer = run(&root, &["observe"]);
     assert!(!second_writer.status.success());
     assert!(String::from_utf8_lossy(&second_writer.stderr).contains("writer is busy"));
-    let database = Connection::open(root.join(".relay/evidence.sqlite")).expect("reopen evidence");
+    let database = Connection::open(state_database(&root)).expect("reopen evidence");
     let after: i64 = database
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count final events");

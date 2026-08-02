@@ -357,27 +357,6 @@ fn read_file_at_no_follow(
     unsafe { fs::File::from_raw_fd(descriptor) }.read_to_end(&mut bytes)?;
     Ok(bytes)
 }
-#[cfg(unix)]
-fn rename_file_at(
-    parent: &fs::File,
-    from: &str,
-    to: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let from = managed_component(from)?;
-    let to = managed_component(to)?;
-    if unsafe {
-        libc::renameat(
-            parent.as_raw_fd(),
-            from.as_ptr(),
-            parent.as_raw_fd(),
-            to.as_ptr(),
-        )
-    } != 0
-    {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    Ok(())
-}
 fn atomic_replace_managed(
     root: &Path,
     components: &[&str],
@@ -1274,8 +1253,6 @@ fn corrupt_database(error: &rusqlite::Error) -> bool {
 #[cfg(unix)]
 struct Database {
     connection: Connection,
-    #[cfg(unix)]
-    _directory: fs::File,
 }
 #[cfg(unix)]
 impl Deref for Database {
@@ -1286,8 +1263,52 @@ impl Deref for Database {
     }
 }
 #[cfg(unix)]
-fn database_path(root: &Path) -> PathBuf {
-    relay_dir(root).join("evidence.sqlite")
+fn state_home() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let base = match env::var_os("RELAY_STATE_HOME") {
+        Some(path) => PathBuf::from(path),
+        None if cfg!(target_os = "macos") => {
+            PathBuf::from(env::var_os("HOME").ok_or("Relay requires HOME for local state")?)
+                .join("Library/Application Support")
+        }
+        None => PathBuf::from(
+            env::var_os("XDG_STATE_HOME")
+                .or_else(|| {
+                    env::var_os("HOME")
+                        .map(|home| PathBuf::from(home).join(".local/state").into_os_string())
+                })
+                .ok_or("Relay requires XDG_STATE_HOME or HOME for local state")?,
+        ),
+    };
+    if !base.is_absolute() {
+        return Err("Relay requires an absolute RELAY_STATE_HOME".into());
+    }
+    let state = base.join("relay");
+    fs::create_dir_all(&state)?;
+    let metadata = fs::symlink_metadata(&state)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Relay refuses a symlinked or non-directory local state path".into());
+    }
+    #[cfg(unix)]
+    fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    Ok(state)
+}
+#[cfg(unix)]
+fn database_path(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let database_dir = state_home()?.join(hash(root.as_os_str().as_bytes()));
+    fs::create_dir(&database_dir).or_else(|error| {
+        (error.kind() == std::io::ErrorKind::AlreadyExists)
+            .then_some(())
+            .ok_or(error)
+    })?;
+    let metadata = fs::symlink_metadata(&database_dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Relay refuses a symlinked or non-directory evidence state path".into());
+    }
+    fs::set_permissions(
+        &database_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )?;
+    Ok(database_dir.join("evidence.sqlite"))
 }
 #[cfg(unix)]
 fn open_database(path: &Path) -> rusqlite::Result<Connection> {
@@ -1299,68 +1320,57 @@ fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     )
 }
 #[cfg(unix)]
-fn quarantine_database(directory: &fs::File) -> Result<(), Box<dyn std::error::Error>> {
+fn quarantine_database(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let suffix = format!(
         "corrupt-{}",
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_nanos()
     );
-    rename_file_at(
-        directory,
-        "evidence.sqlite",
-        &format!("evidence.sqlite.{suffix}"),
-    )?;
+    let parent = path
+        .parent()
+        .ok_or("Relay evidence path has no parent directory")?;
+    fs::rename(path, parent.join(format!("evidence.sqlite.{suffix}")))?;
     for sidecar in ["-wal", "-shm"] {
-        match rename_file_at(
-            directory,
-            &format!("evidence.sqlite{sidecar}"),
-            &format!("evidence.sqlite.{suffix}{sidecar}"),
+        match fs::rename(
+            parent.join(format!("evidence.sqlite{sidecar}")),
+            parent.join(format!("evidence.sqlite.{suffix}{sidecar}")),
         ) {
             Ok(()) => {}
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => {}
-            Err(error) => return Err(error),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
 }
 #[cfg(unix)]
-fn recovered_db(root: &Path, directory: fs::File) -> Result<Database, Box<dyn std::error::Error>> {
-    quarantine_database(&directory)?;
-    let c = open_database(&database_path(root))?;
+fn recovered_db(root: &Path, path: &Path) -> Result<Database, Box<dyn std::error::Error>> {
+    quarantine_database(path)?;
+    let c = open_database(path)?;
     create_schema(&c)?;
     c.execute(
         "INSERT INTO events(kind,snapshot,detail) VALUES('recovered',?1,'privacy-safe-recovery')",
         params![snapshot(root)?],
     )?;
-    Ok(Database {
-        connection: c,
-        _directory: directory,
-    })
+    Ok(Database { connection: c })
 }
 #[cfg(unix)]
 fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
     let root = fs::canonicalize(root)?;
     let root = root.as_path();
-    let directory = managed_directory_no_follow(root, &[".relay"], true)?;
-    if read_file_at_no_follow(&directory, "evidence.sqlite")
+    let path = database_path(root)?;
+    if fs::read(&path)
         .ok()
         .is_some_and(|bytes| !bytes.is_empty() && !bytes.starts_with(b"SQLite format 3\0"))
     {
-        return recovered_db(root, directory);
+        return recovered_db(root, &path);
     }
-    let c = open_database(&database_path(root))?;
+    let c = open_database(&path)?;
     match create_schema(&c) {
-        Ok(()) => Ok(Database {
-            connection: c,
-            _directory: directory,
-        }),
+        Ok(()) => Ok(Database { connection: c }),
         Err(error) if corrupt_database(&error) => {
             drop(c);
-            recovered_db(root, directory)
+            recovered_db(root, &path)
         }
         Err(error) => Err(error.into()),
     }
@@ -2160,7 +2170,7 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
-    fn database_refuses_a_symlinked_evidence_file() {
+    fn database_does_not_touch_a_symlinked_worktree_evidence_file() {
         use std::os::unix::fs::symlink;
 
         let root = env::temp_dir().join(format!(
@@ -2183,14 +2193,14 @@ mod tests {
         fs::write(&target, "PRECIOUS").unwrap();
         symlink(&target, relay_dir(&root).join("evidence.sqlite")).unwrap();
 
-        assert!(db(&root).is_err());
+        assert!(db(&root).is_ok());
         assert_eq!(fs::read_to_string(&target).unwrap(), "PRECIOUS");
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
     #[cfg(unix)]
     #[test]
-    fn database_refuses_a_directory_symlink_after_managed_directory_open() {
+    fn database_does_not_write_outside_state_home_after_worktree_directory_swap() {
         use std::os::unix::fs::symlink;
 
         let root = env::temp_dir().join(format!(
@@ -2215,7 +2225,7 @@ mod tests {
         fs::rename(relay_dir(&root), &original).unwrap();
         symlink(&outside, relay_dir(&root)).unwrap();
 
-        assert!(open_database(&database_path(&root)).is_err());
+        assert!(db(&root).is_ok());
         assert!(!outside.join("evidence.sqlite").exists());
         drop(directory);
         fs::remove_dir_all(root).unwrap();
@@ -2410,13 +2420,10 @@ mod tests {
             .current_dir(&root)
             .status()
             .unwrap();
-        fs::write(
-            relay_dir(&root).join("evidence.sqlite"),
-            "not a sqlite database",
-        )
-        .unwrap();
-        fs::write(relay_dir(&root).join("evidence.sqlite-wal"), "stale wal").unwrap();
-        fs::write(relay_dir(&root).join("evidence.sqlite-shm"), "stale shm").unwrap();
+        let database = database_path(&fs::canonicalize(&root).unwrap()).unwrap();
+        fs::write(&database, "not a sqlite database").unwrap();
+        fs::write(database.with_file_name("evidence.sqlite-wal"), "stale wal").unwrap();
+        fs::write(database.with_file_name("evidence.sqlite-shm"), "stale shm").unwrap();
         let c = db(&root).unwrap();
         let recovered: i64 = c
             .query_row(
@@ -2427,7 +2434,7 @@ mod tests {
             .unwrap();
         assert_eq!(recovered, 1);
         assert!(
-            fs::read_dir(relay_dir(&root))
+            fs::read_dir(database.parent().unwrap())
                 .unwrap()
                 .flatten()
                 .any(|entry| entry
@@ -2436,7 +2443,7 @@ mod tests {
                     .starts_with("evidence.sqlite.corrupt-"))
         );
         assert!(
-            fs::read_dir(relay_dir(&root))
+            fs::read_dir(database.parent().unwrap())
                 .unwrap()
                 .flatten()
                 .any(|entry| {
@@ -2448,7 +2455,7 @@ mod tests {
                 })
         );
         assert!(
-            fs::read_dir(relay_dir(&root))
+            fs::read_dir(database.parent().unwrap())
                 .unwrap()
                 .flatten()
                 .any(|entry| {

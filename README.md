@@ -31,6 +31,16 @@ inspect that process. Stop is a nonce-checked local request; Relay never sends
 a signal to a PID from its state file. `relay status` always says whether generic capture is
 active and keeps semantic context explicitly `unknown` without an adapter.
 
+Evidence SQLite is deliberately stored outside the worktree: under
+`$XDG_STATE_HOME/relay/<worktree-hash>/` on Linux and
+`~/Library/Application Support/relay/<worktree-hash>/` on macOS. This prevents
+a hostile repository from redirecting SQLite or its WAL/SHM sidecars by
+swapping `.relay`. `.relay` remains the repository-local location for the
+bounded resume card, daemon coordination, and opt-in integration state.
+`RELAY_STATE_HOME` may select another **absolute**, user-controlled state base.
+Existing `.relay/evidence.sqlite*` files are left untouched and are not read or
+deleted automatically.
+
 ## Platform support
 
 Relay's managed local state is supported on macOS and Linux. Those platforms
