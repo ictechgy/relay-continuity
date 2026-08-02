@@ -19,8 +19,8 @@ raw command output.
 
 `cargo test` runs the local test suite. The project is local-only by design.
 Tags beginning with `v` build a macOS and Linux binary plus a SHA-256 checksum
-for each platform in GitHub Actions. A public release is intentionally deferred
-until a repository owner and release authority are selected.
+for each platform in GitHub Actions. Before publishing a public release, review
+the workflow artifacts and checksums for the tagged commit.
 The checked-in `rust-toolchain.toml` pins release and CI builds to Rust 1.97.1
 so a tag is rebuilt with the same compiler version.
 
