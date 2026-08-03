@@ -62,19 +62,25 @@ async function verifyOutput(output) {
   const packages = join(output, "packages");
   const tarballs = join(output, "tarballs");
   const orderPath = join(output, "publish-order.txt");
-  if (!existsSync(packages) || !existsSync(tarballs) || !existsSync(orderPath)) {
-    throw new Error(`${output}: missing packages, tarballs, or publish-order.txt`);
+  const publishManifestPath = join(output, "publish-manifest.json");
+  if (!existsSync(packages) || !existsSync(tarballs) || !existsSync(orderPath) || !existsSync(publishManifestPath)) {
+    throw new Error(`${output}: missing packages, tarballs, publish-order.txt, or publish-manifest.json`);
   }
 
   const order = (await readFile(orderPath, "utf8")).trim().split("\n").filter(Boolean);
+  const publishManifest = JSON.parse(await readFile(publishManifestPath, "utf8"));
   if (order.length !== packageDirectories.length) {
     throw new Error(`${orderPath}: expected ${packageDirectories.length} package tarballs`);
+  }
+  if (!Array.isArray(publishManifest.packages) || publishManifest.packages.length !== order.length) {
+    throw new Error(`${publishManifestPath}: expected ${order.length} package entries`);
   }
 
   for (const [index, directory] of packageDirectories.entries()) {
     const template = await readManifest(join(root, "packages", directory, "package.json"));
     const generated = await readManifest(join(packages, directory, "package.json"));
     const tarball = join(tarballs, order[index]);
+    const published = publishManifest.packages[index];
     if (!existsSync(tarball) || basename(tarball) !== order[index]) {
       throw new Error(`${orderPath}: missing tarball ${order[index]}`);
     }
@@ -88,6 +94,13 @@ async function verifyOutput(output) {
       if (manifest.name !== template.name) throw new Error(`${source}: package name does not match ${directory}`);
     }
     if (packed.version !== generated.version) throw new Error(`${tarball}: version does not match generated manifest`);
+    if (
+      published?.name !== generated.name ||
+      published?.tarball !== order[index] ||
+      published?.version !== generated.version
+    ) {
+      throw new Error(`${publishManifestPath}: entry ${index + 1} does not match ${directory}`);
+    }
   }
 }
 
