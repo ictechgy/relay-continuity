@@ -10,7 +10,7 @@
 2. Replace secret-based npm publishing with GitHub Actions OIDC trusted
    publishing. Make release automation stage packages only, preserving the
    ordered platform/wrapper **staging** flow and `next` tag. Emit the ordered
-   package/tarball/version staging manifest and require a maintainer to resolve
+   package/tarball/version/SHA-256 staging manifest and require a maintainer to resolve
    stage IDs in npm's authenticated UI or CLI before approving the three
    platform stages before the wrapper with npm 2FA.
 3. Document exact one-time external setup for each of the four existing npm
@@ -63,14 +63,15 @@
 ### Expanded test plan
 
 - Unit/static: parse `quality-gate.json`; assert no `NPM_TOKEN` or
-  `NODE_AUTH_TOKEN` write-token reference; validate the canonical repository
+  `NODE_AUTH_TOKEN` write-token reference, non-persistent checkout credentials,
+  and per-tarball SHA-256 evidence; validate the canonical repository
   URL in every npm package manifest; validate issue-form YAML syntax and
   required privacy/security routing text.
 - Integration: exercise `scripts/package-npm.mjs` using generated fixture
   release artifacts and inspect publish order; run cargo gates unaffected by
   documentation/workflow changes.
 - E2E/release: on a future disposable prerelease tag after npm configuration,
-  verify the four package/tarball/version staging-manifest entries, resolve the
+  verify the four package/tarball/version/SHA-256 staging-manifest entries, resolve the
   corresponding stage IDs in an authenticated npm owner session, inspect
   downloaded staged tarballs, approve platform stages before the wrapper with
   2FA, confirm the immutable `next` tag on each stage, and clean-install
@@ -97,7 +98,7 @@
    - use `npm stage publish` on tarballs in `publish-order.txt` with explicit
      `--access public --tag next`; validate that it accepts `<package-spec>`
      tarballs with a current npm 11.15+ CLI before merging;
-   - emit an ordered machine-readable package/tarball/version staging manifest
+   - emit an ordered machine-readable package/tarball/version/SHA-256 staging manifest
      without secrets, then upload it as a release-workflow artifact for the
      maintainer; do not infer a stage ID from undocumented CLI output.
 3. Canonicalize every source npm package manifest's `repository` metadata to
@@ -133,7 +134,7 @@
   only after `npm-packages` succeeds and `PUBLISH_NPM == 'true'`.
 - The release npm job uses Node >=22.14 and npm >=11.15, disables cache, and
   preserves `publish-order.txt` as the platform-before-wrapper staging order,
-  produces a package/tarball/version staging manifest, and passes `next`
+  produces a package/tarball/version/SHA-256 staging manifest, and passes `next`
   explicitly.
 - All four source and generated npm manifests use the exact canonical
   `git+https://github.com/ictechgy/relay-continuity.git` repository URL.
@@ -335,7 +336,7 @@ Final independent review found that npm's documented `stage publish` contract
 does not establish a JSON stage-ID response, and that an OIDC trust token cannot
 use `npm stage list` to recover it in CI. The former package/stage-ID artifact
 requirement is superseded by a safer split: CI emits a validated ordered
-package/tarball/version staging manifest from `publish-order.txt`; an
+package/tarball/version/SHA-256 staging manifest from `publish-order.txt`; an
 authenticated npm owner resolves stage IDs in the npm UI or maintainer CLI and
 records them before inspection/approval. This preserves the chosen stage-only
 OIDC architecture while removing an unproven post-mutation parser and avoiding

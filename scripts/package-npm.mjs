@@ -105,7 +105,13 @@ for (const directory of [...platformPackages.map(([name]) => name), "relay"]) {
   const filename = npmPack(join(packages, directory), tarballs);
   packed.push(basename(filename));
   const manifest = JSON.parse(await readFile(join(packages, directory, "package.json"), "utf8"));
-  publishManifest.push({ name: manifest.name, tarball: basename(filename), version: manifest.version });
+  const tarball = basename(filename);
+  publishManifest.push({
+    name: manifest.name,
+    tarball,
+    version: manifest.version,
+    sha256: await sha256(join(tarballs, tarball))
+  });
 }
 await writeFile(join(output, "publish-order.txt"), `${packed.join("\n")}\n`);
 await writeFile(join(output, "publish-manifest.json"), `${JSON.stringify({ version: arguments_.version, packages: publishManifest }, null, 2)}\n`);
