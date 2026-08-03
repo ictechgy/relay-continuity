@@ -33,6 +33,11 @@ jobs:
         run: |
           node --check packages/relay/bin/relay.js
           node --check scripts/package-npm.mjs
+          node --check scripts/stage-npm-packages.mjs
+          node --check scripts/verify-npm-packages.mjs
+          node --check scripts/test-package-npm.mjs
+          node scripts/verify-npm-packages.mjs --templates
+          node scripts/test-package-npm.mjs
           node --check scripts/render-homebrew-formula.mjs
           node scripts/render-homebrew-formula.mjs \
             --version 0.2.0-rc.6 \

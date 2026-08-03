@@ -1,0 +1,35 @@
+{
+  "status": "RALPLAN_CONSENSUS_COMPLETE",
+  "task": "release evidence, npm OIDC, and privacy-safe public feedback",
+  "planningArtifacts": [
+    ".omx/context/release-evidence-oidc-feedback-20260802T135052Z.md",
+    ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
+    ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md"
+  ],
+  "spawnMode": "role-selectable-native",
+  "selectedSelectorField": "agent_type",
+  "taskNameIsRoleSelector": false,
+  "independentLanes": true,
+  "sequentialOrder": ["architect", "critic"],
+  "surrogateReviewsUsed": false,
+  "architect": {
+    "status": "ITERATE",
+    "iteration": 1,
+    "requiredChanges": [
+      "Record exact rc.6 registry dist-tags.",
+      "Validate canonical repository metadata for every generated npm package.",
+      "Map stage IDs and require platform-before-wrapper approval."
+    ],
+    "resolved": true
+  },
+  "critic": {
+    "status": "APPROVE",
+    "iteration": 2,
+    "snapshot": "0349cc8da11fea916f41d7e3b433a10278337686"
+  },
+  "ralplanConsensusGate": {
+    "complete": true,
+    "reason": "Sequential native Architect then Critic review completed; Critic approved the revised plan."
+  },
+  "nextAction": "Explicitly transition to an execution workflow, preferably ultragoal, without treating owner-controlled npm/GitHub settings as repository changes."
+}

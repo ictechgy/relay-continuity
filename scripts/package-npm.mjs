@@ -100,8 +100,12 @@ const wrapperDirectory = join(packages, "relay");
 await copyPackage(join(root, "packages", "relay"), wrapperDirectory, arguments_.version);
 
 const packed = [];
+const publishManifest = [];
 for (const directory of [...platformPackages.map(([name]) => name), "relay"]) {
   const filename = npmPack(join(packages, directory), tarballs);
   packed.push(basename(filename));
+  const manifest = JSON.parse(await readFile(join(packages, directory, "package.json"), "utf8"));
+  publishManifest.push({ name: manifest.name, tarball: basename(filename), version: manifest.version });
 }
 await writeFile(join(output, "publish-order.txt"), `${packed.join("\n")}\n`);
+await writeFile(join(output, "publish-manifest.json"), `${JSON.stringify({ version: arguments_.version, packages: publishManifest }, null, 2)}\n`);

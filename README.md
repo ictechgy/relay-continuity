@@ -136,6 +136,16 @@ database, and adapter metadata cannot write cards or prove an assertion.
 
 Relay carries observable work evidence, not a complete AI thought process.
 
+## Feedback and security reports
+
+Use the GitHub bug and feature-request forms for public feedback about Relay.
+Please do not include source code, diffs, terminal output, absolute paths,
+chat transcripts, tokens, credentials, customer data, or any other sensitive
+work artifact. GitHub Discussions can be enabled later by the repository owner
+if a less structured public channel is useful.
+
+Potential vulnerabilities must use [private vulnerability reporting](SECURITY.md#reporting-a-vulnerability), never a public issue.
+
 ## Automatic session-start integration (v0.2)
 
 Relay has two separate opt-ins. They are one-time setup operations, not skills
