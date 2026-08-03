@@ -21,6 +21,14 @@ function run(script, arguments_) {
   if (result.status !== 0) throw new Error(`${script} failed`);
 }
 
+function runExpectFailure(script, arguments_) {
+  const result = spawnSync(process.execPath, [script, ...arguments_], {
+    cwd: root,
+    encoding: "utf8"
+  });
+  if (result.status === 0) throw new Error(`${script} unexpectedly succeeded`);
+}
+
 const fixture = await mkdtemp(join(tmpdir(), "relay-npm-package-test-"));
 try {
   const artifactRoot = join(fixture, "artifacts");
@@ -48,6 +56,7 @@ try {
   const staged = JSON.parse(await readFile(receipt, "utf8"));
   if (
     staged.status !== "validated" ||
+    !staged.stages?.every((entry) => /^[a-f0-9]{64}$/.test(entry.sha256)) ||
     staged.stages?.map((entry) => entry.package).join(",") !== [
       "@ictechgy/relay-darwin-arm64",
       "@ictechgy/relay-darwin-x64",
@@ -73,6 +82,17 @@ try {
   if (diverged.stages?.map((entry) => entry.package).join(",") !== staged.stages.map((entry) => entry.package).join(",")) {
     throw new Error("stage manifest must use publish-order.txt instead of publish-manifest.json order");
   }
+  const tamperedManifest = JSON.parse(await readFile(join(output, "publish-manifest.json"), "utf8"));
+  tamperedManifest.packages[0].sha256 = "0".repeat(64);
+  const tamperedPath = join(fixture, "publish-manifest-tampered.json");
+  await writeFile(tamperedPath, `${JSON.stringify(tamperedManifest)}\n`);
+  runExpectFailure("scripts/stage-npm-packages.mjs", [
+    "--tarballs", join(output, "tarballs"),
+    "--order", join(output, "publish-order.txt"),
+    "--manifest", tamperedPath,
+    "--output", join(fixture, "tampered-stage-manifest.json"),
+    "--dry-run"
+  ]);
 } finally {
   await rm(fixture, { recursive: true, force: true });
 }

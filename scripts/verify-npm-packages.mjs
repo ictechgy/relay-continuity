@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { existsSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const expectedRepository = {
@@ -49,6 +51,12 @@ function readTarManifest(path) {
     throw new Error(`${path}: unable to read packed package.json: ${result.stderr || result.stdout}`);
   }
   return JSON.parse(result.stdout);
+}
+
+async function sha256(path) {
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  return digest.digest("hex");
 }
 
 async function verifyTemplates() {
@@ -97,7 +105,9 @@ async function verifyOutput(output) {
     if (
       published?.name !== generated.name ||
       published?.tarball !== order[index] ||
-      published?.version !== generated.version
+      published?.version !== generated.version ||
+      !/^[a-f0-9]{64}$/.test(published?.sha256) ||
+      published.sha256 !== await sha256(tarball)
     ) {
       throw new Error(`${publishManifestPath}: entry ${index + 1} does not match ${directory}`);
     }

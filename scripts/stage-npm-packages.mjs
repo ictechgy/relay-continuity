@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 
 import { existsSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const expectedPackages = [
   "@ictechgy/relay-darwin-arm64",
@@ -14,6 +16,12 @@ const expectedPackages = [
 
 function usage() {
   throw new Error("usage: stage-npm-packages.mjs --tarballs <dir> --order <file> --manifest <file> --output <file> [--dry-run]");
+}
+
+async function sha256(path) {
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(path)) digest.update(chunk);
+  return digest.digest("hex");
 }
 
 function readArguments(argv) {
@@ -50,17 +58,25 @@ async function stagedInputs(arguments_) {
   }
 
   const byTarball = new Map(manifest.packages.map((entry) => [entry.tarball, entry]));
-  const inputs = order.map((tarball, index) => {
+  const inputs = await Promise.all(order.map(async (tarball, index) => {
     const entry = byTarball.get(tarball);
-    if (!entry || entry.name !== expectedPackages[index] || typeof entry.version !== "string") {
+    if (
+      !entry ||
+      entry.name !== expectedPackages[index] ||
+      typeof entry.version !== "string" ||
+      !/^[a-f0-9]{64}$/.test(entry.sha256)
+    ) {
       throw new Error(`publish order does not match expected package at position ${index + 1}`);
     }
     const path = join(arguments_.tarballs, tarball);
     if (!tarball.endsWith(".tgz") || !existsSync(path)) {
       throw new Error(`missing tarball for ${entry.name}: ${tarball}`);
     }
-    return { package: entry.name, tarball, version: entry.version, path };
-  });
+    if ((await sha256(path)) !== entry.sha256) {
+      throw new Error(`tarball checksum mismatch for ${entry.name}: ${tarball}`);
+    }
+    return { package: entry.name, tarball, version: entry.version, sha256: entry.sha256, path };
+  }));
   if (byTarball.size !== inputs.length || manifest.packages.some((entry) => !order.includes(entry.tarball))) {
     throw new Error("publish manifest and publish order must contain the same tarballs");
   }
@@ -89,14 +105,14 @@ const stages = [];
 
 if (arguments_.dryRun) {
   for (const entry of inputs) {
-    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, distTag: "next", status: "validated" });
+    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, sha256: entry.sha256, distTag: "next", status: "validated" });
   }
   await writeReceipt(arguments_.output, version, "validated", stages);
 } else {
   await writeReceipt(arguments_.output, version, "staging", stages);
   for (const entry of inputs) {
     stage(entry.path);
-    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, distTag: "next", status: "staged" });
+    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, sha256: entry.sha256, distTag: "next", status: "staged" });
     await writeReceipt(arguments_.output, version, "staging", stages);
   }
   await writeReceipt(arguments_.output, version, "staged", stages);
