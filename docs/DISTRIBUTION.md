@@ -57,7 +57,8 @@ the downloaded tarball and compares it to the package artifact manifest. CI
 deliberately does not guess or parse a stage ID from npm command output. In npm's
 Staged Packages UI (or with an authenticated maintainer CLI session), find each
 package/version from that manifest, record its stage ID, and download the staged
-tarball for inspection. Then approve the three platform packages first and
+tarball for inspection. Recompute its SHA-256 and compare it to the matching
+`npm-stage-manifest` entry before approval. Then approve the three platform packages first and
 `@ictechgy/relay` last. Approving a stage makes it public and prompts for 2FA;
 the CI job only stages it. If staging fails after a partial run, inspect the
 manifest and Staged Packages before retrying: a staged version already occupies
