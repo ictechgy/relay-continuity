@@ -47,27 +47,47 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
           test -n "$version"
           node scripts/package-npm.mjs --artifacts release-assets --output dist/npm --version "$version"
+          node scripts/verify-npm-packages.mjs --output dist/npm
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-packages
           path: |
             dist/npm/tarballs
             dist/npm/publish-order.txt
+            dist/npm/publish-manifest.json
   npm-publish:
     if: github.event_name == 'push' && github.ref_type == 'tag' && vars.PUBLISH_NPM == 'true'
     needs: npm-packages
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: npm-packages
           path: npm-packages
-      - name: Publish platform packages before the wrapper
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Verify npm staging toolchain
         run: |
-          while IFS= read -r package; do
-            npm publish "npm-packages/tarballs/$package" --access public --provenance --tag next
-          done < npm-packages/publish-order.txt
+          npm install --global npm@11.15.0 --ignore-scripts
+          node --version
+          npm --version
+          node --input-type=module -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (major < 22 || (major === 22 && minor < 14)) throw new Error("Node 22.14.0 or later is required");'
+          node --input-type=module -e 'const [major, minor] = (await import("node:child_process")).execFileSync("npm", ["--version"], { encoding: "utf8" }).trim().split(".").map(Number); if (major < 11 || (major === 11 && minor < 15)) throw new Error("npm 11.15.0 or later is required");'
+      - name: Stage platform packages before the wrapper
+        run: |
+          node scripts/stage-npm-packages.mjs \
+            --tarballs npm-packages/tarballs \
+            --manifest npm-packages/publish-manifest.json \
+            --output npm-stage-summary.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-stage-summary
+          path: npm-stage-summary.json
+          if-no-files-found: error
