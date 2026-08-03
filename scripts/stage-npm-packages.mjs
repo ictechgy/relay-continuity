@@ -5,102 +5,99 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-const platformPrefix = "@ictechgy/relay-";
-const wrapper = "@ictechgy/relay";
+const expectedPackages = [
+  "@ictechgy/relay-darwin-arm64",
+  "@ictechgy/relay-darwin-x64",
+  "@ictechgy/relay-linux-x64",
+  "@ictechgy/relay"
+];
 
 function usage() {
-  throw new Error("usage: stage-npm-packages.mjs --tarballs <dir> --manifest <file> --output <file>");
+  throw new Error("usage: stage-npm-packages.mjs --tarballs <dir> --order <file> --manifest <file> --output <file> [--dry-run]");
 }
 
 function readArguments(argv) {
-  const result = {};
-  for (let index = 2; index < argv.length; index += 2) {
+  const result = { dryRun: false };
+  for (let index = 2; index < argv.length; index += 1) {
     const key = argv[index];
+    if (key === "--dry-run") {
+      result.dryRun = true;
+      continue;
+    }
     const value = argv[index + 1];
     if (!key?.startsWith("--") || !value) usage();
     result[key.slice(2)] = value;
+    index += 1;
   }
-  if (!result.tarballs || !result.manifest || !result.output) usage();
+  if (!result.tarballs || !result.order || !result.manifest || !result.output) usage();
   return {
     tarballs: resolve(result.tarballs),
+    order: resolve(result.order),
     manifest: resolve(result.manifest),
-    output: resolve(result.output)
+    output: resolve(result.output),
+    dryRun: result.dryRun
   };
 }
 
-function findStageId(value) {
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = findStageId(entry);
-      if (found) return found;
-    }
-    return undefined;
-  }
-  if (!value || typeof value !== "object") return undefined;
-  for (const key of ["stageId", "stage_id", "id"]) {
-    if (typeof value[key] === "string" && value[key].trim()) return value[key];
-  }
-  for (const nested of Object.values(value)) {
-    const found = findStageId(nested);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-function validateManifest(manifest, tarballs) {
-  if (!Array.isArray(manifest.packages) || manifest.packages.length !== 4) {
+async function stagedInputs(arguments_) {
+  const manifest = JSON.parse(await readFile(arguments_.manifest, "utf8"));
+  const order = (await readFile(arguments_.order, "utf8")).trim().split("\n").filter(Boolean);
+  if (!Array.isArray(manifest.packages) || manifest.packages.length !== expectedPackages.length) {
     throw new Error("publish manifest must contain exactly four packages");
   }
-  const names = manifest.packages.map((entry) => entry.name);
-  if (
-    names.slice(0, 3).some((name) => typeof name !== "string" || !name.startsWith(platformPrefix)) ||
-    names[3] !== wrapper
-  ) {
-    throw new Error("publish manifest must stage three platform packages before the wrapper");
+  if (order.length !== expectedPackages.length || new Set(order).size !== order.length) {
+    throw new Error("publish order must contain four unique tarballs");
   }
-  for (const entry of manifest.packages) {
-    if (typeof entry.tarball !== "string" || !entry.tarball.endsWith(".tgz")) {
-      throw new Error(`invalid tarball for ${entry.name}`);
+
+  const byTarball = new Map(manifest.packages.map((entry) => [entry.tarball, entry]));
+  const inputs = order.map((tarball, index) => {
+    const entry = byTarball.get(tarball);
+    if (!entry || entry.name !== expectedPackages[index] || typeof entry.version !== "string") {
+      throw new Error(`publish order does not match expected package at position ${index + 1}`);
     }
-    if (!existsSync(join(tarballs, entry.tarball))) {
-      throw new Error(`missing tarball for ${entry.name}: ${entry.tarball}`);
+    const path = join(arguments_.tarballs, tarball);
+    if (!tarball.endsWith(".tgz") || !existsSync(path)) {
+      throw new Error(`missing tarball for ${entry.name}: ${tarball}`);
     }
+    return { package: entry.name, tarball, version: entry.version, path };
+  });
+  if (byTarball.size !== inputs.length || manifest.packages.some((entry) => !order.includes(entry.tarball))) {
+    throw new Error("publish manifest and publish order must contain the same tarballs");
   }
+  return { version: manifest.version, inputs };
 }
 
-function stage(tarball) {
-  const result = spawnSync(
-    "npm",
-    ["stage", "publish", tarball, "--access", "public", "--tag", "next", "--json"],
-    { encoding: "utf8" }
-  );
+function stage(path) {
+  const result = spawnSync("npm", ["stage", "publish", path, "--access", "public", "--tag", "next"], {
+    encoding: "utf8"
+  });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
-  if (result.status !== 0) throw new Error(`npm stage publish failed for ${tarball}`);
-  let payload;
-  try {
-    payload = JSON.parse(result.stdout);
-  } catch {
-    throw new Error(`npm stage publish did not return JSON for ${tarball}`);
-  }
-  const stageId = findStageId(payload);
-  if (!stageId) throw new Error(`npm stage publish did not return a stage ID for ${tarball}`);
-  return stageId;
+  if (result.status !== 0) throw new Error(`npm stage publish failed for ${path}`);
+}
+
+async function writeReceipt(output, version, status, stages) {
+  await writeFile(
+    output,
+    `${JSON.stringify({ schemaVersion: 1, version, status, stages }, null, 2)}\n`
+  );
 }
 
 const arguments_ = readArguments(process.argv);
-const manifest = JSON.parse(await readFile(arguments_.manifest, "utf8"));
-validateManifest(manifest, arguments_.tarballs);
+const { version, inputs } = await stagedInputs(arguments_);
+const stages = [];
 
-const stages = manifest.packages.map((entry) => ({
-  package: entry.name,
-  tarball: entry.tarball,
-  version: entry.version,
-  distTag: "next",
-  stageId: stage(join(arguments_.tarballs, entry.tarball))
-}));
-
-await writeFile(
-  arguments_.output,
-  `${JSON.stringify({ schemaVersion: 1, version: manifest.version, stages }, null, 2)}\n`
-);
+if (arguments_.dryRun) {
+  for (const entry of inputs) {
+    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, distTag: "next", status: "validated" });
+  }
+  await writeReceipt(arguments_.output, version, "validated", stages);
+} else {
+  await writeReceipt(arguments_.output, version, "staging", stages);
+  for (const entry of inputs) {
+    stage(entry.path);
+    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, distTag: "next", status: "staged" });
+    await writeReceipt(arguments_.output, version, "staging", stages);
+  }
+  await writeReceipt(arguments_.output, version, "staged", stages);
+}

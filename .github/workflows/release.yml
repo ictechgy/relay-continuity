@@ -84,10 +84,12 @@ jobs:
         run: |
           node scripts/stage-npm-packages.mjs \
             --tarballs npm-packages/tarballs \
+            --order npm-packages/publish-order.txt \
             --manifest npm-packages/publish-manifest.json \
-            --output npm-stage-summary.json
+            --output npm-stage-manifest.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
         with:
-          name: npm-stage-summary
-          path: npm-stage-summary.json
-          if-no-files-found: error
+          name: npm-stage-manifest
+          path: npm-stage-manifest.json
+          if-no-files-found: warn
