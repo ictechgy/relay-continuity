@@ -10,8 +10,9 @@
 2. Replace secret-based npm publishing with GitHub Actions OIDC trusted
    publishing. Make release automation stage packages only, preserving the
    ordered platform/wrapper **staging** flow and `next` tag. Emit the ordered
-   package-to-stage-ID mapping and require a maintainer to inspect/approve the
-   three platform stages before the wrapper stage with npm 2FA.
+   package/tarball/version staging manifest and require a maintainer to resolve
+   stage IDs in npm's authenticated UI or CLI before approving the three
+   platform stages before the wrapper with npm 2FA.
 3. Document exact one-time external setup for each of the four existing npm
    packages and state that the repository cannot complete it. Include the
    correct owner/repository/workflow settings and a safe migration/recovery
@@ -55,7 +56,7 @@
 | --- | --- | --- |
 | npm rejects OIDC at release time | `ENEEDAUTH` or publisher mismatch in a dry-run tag workflow. | Pin compatible Node/npm; document exact per-package `ictechgy` / `relay-continuity` / `release.yml` configuration; retain workflow-artifact manual fallback. |
 | A malicious/incorrect tag stages public packages | Unexpected release job starts. | Require stage-only permission, restrict tag creation externally, and require owner 2FA approval after tarball review. |
-| Wrapper is approved before its optional platform packages | `@ictechgy/relay` would reference unavailable exact package versions. | Emit package-to-stage-ID evidence; require platform approvals, then wrapper approval, and clean-install only after all four are live. |
+| Wrapper is approved before its optional platform packages | `@ictechgy/relay` would reference unavailable exact package versions. | Emit package/tarball/version evidence; resolve stage IDs as owner evidence, require platform approvals, then wrapper approval, and clean-install only after all four are live. |
 | OIDC trusts a package whose repository metadata does not match | `ENEEDAUTH`/publisher mismatch on the first tag. | Canonicalize/check `repository` metadata in every package manifest and inspect packed manifests before enabling the gate. |
 | Feedback issue exposes sensitive code/work data | Form invites logs or raw reproductions. | Put a privacy warning at form top, prohibit sensitive fields, and route security reports to private reporting. |
 
@@ -69,9 +70,10 @@
   release artifacts and inspect publish order; run cargo gates unaffected by
   documentation/workflow changes.
 - E2E/release: on a future disposable prerelease tag after npm configuration,
-  verify the four package-to-stage-ID mappings, inspect downloaded staged
-  tarballs, approve platform stages before the wrapper with 2FA, confirm the
-  immutable `next` tag on each stage, and clean-install
+  verify the four package/tarball/version staging-manifest entries, resolve the
+  corresponding stage IDs in an authenticated npm owner session, inspect
+  downloaded staged tarballs, approve platform stages before the wrapper with
+  2FA, confirm the immutable `next` tag on each stage, and clean-install
   `@ictechgy/relay@next` on supported platforms.
 - Observability/evidence: link exact Actions run/job outcomes and release SHA
   hashes; record external npm configuration/approval as owner evidence, not as
@@ -95,8 +97,9 @@
    - use `npm stage publish` on tarballs in `publish-order.txt` with explicit
      `--access public --tag next`; validate that it accepts `<package-spec>`
      tarballs with a current npm 11.15+ CLI before merging;
-   - emit an ordered machine-readable package/stage-ID summary without secrets,
-     then upload it as a release-workflow artifact for the maintainer.
+   - emit an ordered machine-readable package/tarball/version staging manifest
+     without secrets, then upload it as a release-workflow artifact for the
+     maintainer; do not infer a stage ID from undocumented CLI output.
 3. Canonicalize every source npm package manifest's `repository` metadata to
    the exact `git+https://github.com/ictechgy/relay-continuity.git` form, and
    add a deterministic package-validation check that verifies the generated
@@ -104,7 +107,7 @@
 4. Rewrite `docs/DISTRIBUTION.md` around OIDC staged publishing: exact four
    package names, npm UI fields (`ictechgy`, `relay-continuity`, `release.yml`,
    stage-only), canonical repository metadata, npm package publishing-access
-   hardening, stage-ID inspection/download, platform-before-wrapper approval,
+   hardening, owner-side stage-ID inspection/download, platform-before-wrapper approval,
    safe migration sequence, manual artifact fallback, and direct links to
    official npm docs.
 5. Create strict GitHub issue forms and configuration. The forms include
@@ -129,8 +132,9 @@
   `id-token: write`, uses GitHub-hosted Ubuntu, and invokes `npm stage publish`
   only after `npm-packages` succeeds and `PUBLISH_NPM == 'true'`.
 - The release npm job uses Node >=22.14 and npm >=11.15, disables cache, and
-  preserves platform-before-wrapper staging order, produces a package/stage-ID
-  artifact, and passes `next` explicitly.
+  preserves `publish-order.txt` as the platform-before-wrapper staging order,
+  produces a package/tarball/version staging manifest, and passes `next`
+  explicitly.
 - All four source and generated npm manifests use the exact canonical
   `git+https://github.com/ictechgy/relay-continuity.git` repository URL.
 - Distribution docs identify the four exact packages and name the three
@@ -152,8 +156,9 @@
 - The provider setting is configured independently per package. Mitigate with a
   four-package checklist and do not enable `PUBLISH_NPM` until all are checked.
 - A staged package can be approved outside this repo. Mitigate with a release
-  checklist that binds package name, stage ID, tarball inspection, tag SHA,
-  immutable stage dist-tag, ordered approvals, and approver.
+  checklist that binds package name, tarball, version, owner-resolved stage ID,
+  tarball inspection, tag SHA, immutable stage dist-tag, ordered approvals,
+  and approver.
 - `npm stage publish` supports a package-spec by current npm CLI docs, but the
   exact tarball path must be exercised with npm >=11.15 before workflow merge.
   If this reveals an incompatibility, stage from extracted package directories
@@ -204,8 +209,8 @@ they want a less structured feedback channel.
 - Added exact rc.6 external registry dist-tag evidence rather than assuming
   `next` is the sole tag.
 - Added canonical package repository metadata verification for npm OIDC.
-- Distinguished staging order from public approval order; added stage-ID
-  artifact evidence and platform-before-wrapper approval requirements.
+- Distinguished staging order from public approval order; added owner-resolved
+  stage-ID evidence and platform-before-wrapper approval requirements.
 - Made Node/npm assertions and the `actions/setup-node` pin explicit.
 
 ## Consensus reviews
@@ -218,8 +223,8 @@ validate canonical package `repository` metadata for GitHub OIDC, and record
 actual registry dist-tags rather than assuming `next` alone. The revision above
 implements those corrections. The Architect's steelman counterargument was
 that direct OIDC publish could be operationally simpler for the four-package
-graph, but its synthesis retained stage-only OIDC once stage IDs and approval
-ordering become explicit evidence.
+graph, but its synthesis retained stage-only OIDC once owner stage-ID evidence
+and approval ordering become explicit.
 
 ### Critic (iteration 2): APPROVE
 
@@ -323,3 +328,15 @@ Discussions enablement.
 - Stop and revise if `npm stage publish` cannot stage the generated tarball
   package spec using the pinned current CLI, if package repository metadata
   does not meet npm OIDC requirements, or if any final CI/review is non-passing.
+
+## Execution steering: stage-ID provenance (2026-08-03)
+
+Final independent review found that npm's documented `stage publish` contract
+does not establish a JSON stage-ID response, and that an OIDC trust token cannot
+use `npm stage list` to recover it in CI. The former package/stage-ID artifact
+requirement is superseded by a safer split: CI emits a validated ordered
+package/tarball/version staging manifest from `publish-order.txt`; an
+authenticated npm owner resolves stage IDs in the npm UI or maintainer CLI and
+records them before inspection/approval. This preserves the chosen stage-only
+OIDC architecture while removing an unproven post-mutation parser and avoiding
+an unsafe retry after a staged version occupies the registry index.

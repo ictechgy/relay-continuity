@@ -50,12 +50,17 @@ owner-controlled actions; they are not performed by this repository. npm's
 [staged publishing guide](https://docs.npmjs.com/staged-publishing/) are the
 source of truth for current account and CLI requirements.
 
-For a tagged release, download the `npm-stage-summary` workflow artifact. It
-maps every package to its immutable stage ID and `next` dist-tag. Download and
-inspect each staged tarball, then approve the three platform packages first and
-`@ictechgy/relay` last. Approving a stage makes it public and prompts for 2FA;
-the CI job only stages it. Do not enable `PUBLISH_NPM` until all four trusted
-publisher configurations have been verified.
+For a tagged release, download the `npm-stage-manifest` workflow artifact. It
+records the verified package, tarball, version, and immutable `next` dist-tag
+in staging order. CI deliberately does not guess or parse a stage ID from npm
+command output. In npm's Staged Packages UI (or with an authenticated maintainer
+CLI session), find each package/version from that manifest, record its stage ID,
+and download the staged tarball for inspection. Then approve the three platform
+packages first and `@ictechgy/relay` last. Approving a stage makes it public and
+prompts for 2FA; the CI job only stages it. If staging fails after a partial
+run, inspect the manifest and Staged Packages before retrying: a staged version
+already occupies that package version. Do not enable `PUBLISH_NPM` until all
+four trusted publisher configurations have been verified.
 
 If publication is intentionally disabled, download the `npm-packages` workflow
 artifact, publish the three `relay-*` platform tarballs with `--access public

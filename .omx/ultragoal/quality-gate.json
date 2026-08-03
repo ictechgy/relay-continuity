@@ -88,7 +88,7 @@
       },
       "limits": "This is a dated external registry observation, not a claim about a future tag or workflow outcome."
     },
-    "requiredBeforeFuturePublishing": "Review the tagged workflow artifacts, stage summary, SHA-256 checksums, and staged tarballs before owner 2FA approval."
+    "requiredBeforeFuturePublishing": "Review the tagged workflow artifacts, npm-stage-manifest, owner-resolved stage IDs, SHA-256 checksums, and staged tarballs before owner 2FA approval."
   },
   "remainingProductLimits": [
     "Claude and Grok automatic context injection remain unavailable until their installed, authenticated hook contracts prove safe.",
