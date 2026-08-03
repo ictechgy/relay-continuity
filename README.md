@@ -139,7 +139,7 @@ Relay carries observable work evidence, not a complete AI thought process.
 ## Feedback and security reports
 
 Use the GitHub bug and feature-request forms for public feedback about Relay.
-Please do not include source code, diffs, terminal output, absolute paths,
+Please do not include source code, diffs, terminal output, paths,
 chat transcripts, tokens, credentials, customer data, or any other sensitive
 work artifact. GitHub Discussions can be enabled later by the repository owner
 if a less structured public channel is useful.
