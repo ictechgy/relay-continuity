@@ -1,6 +1,6 @@
 {
   "name": "@ictechgy/relay-linux-x64",
-  "version": "0.2.0-rc.6",
+  "version": "0.2.0-rc.7",
   "description": "Relay native binary for Linux x86_64",
   "license": "MIT",
   "repository": {
