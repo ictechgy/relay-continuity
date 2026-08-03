@@ -41,8 +41,10 @@ jobs:
           node scripts/verify-npm-packages.mjs --templates
           node scripts/test-package-npm.mjs
           node --check scripts/render-homebrew-formula.mjs
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
           node scripts/render-homebrew-formula.mjs \
-            --version 0.2.0-rc.6 \
+            --version "$version" \
             --macos-arm64 0000000000000000000000000000000000000000000000000000000000000000 \
             --macos-x64 1111111111111111111111111111111111111111111111111111111111111111 \
             --linux-x64 2222222222222222222222222222222222222222222222222222222222222222 \
