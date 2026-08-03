@@ -1,8 +1,8 @@
 {
   "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
   "omxAvailable": false,
-  "status": "in_progress",
-  "activeGoal": "G106",
+  "status": "complete",
+  "completedGoal": "G106",
   "plan": ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
   "testSpec": ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md",
   "implementationReview": {
@@ -93,5 +93,61 @@
   "remainingProductLimits": [
     "Claude and Grok automatic context injection remain unavailable until their installed, authenticated hook contracts prove safe.",
     "Windows managed-state operations remain intentionally unsupported."
-  ]
+  ],
+  "finalQualityGate": {
+    "goalId": "G106",
+    "aiSlopCleaner": {
+      "status": "passed",
+      "evidence": "Bounded changed-file inventory found no masking fallback, TODO/FIXME, dead code, or cleanup edit after the final provenance repair."
+    },
+    "verification": {
+      "status": "passed",
+      "commands": [
+        "cargo fmt --check",
+        "cargo check --all-targets --locked",
+        "cargo test --locked (33 passed)",
+        "cargo clippy --all-targets --all-features --locked -- -D warnings",
+        "cargo build --release --locked",
+        "cargo audit --deny warnings",
+        "node scripts/verify-npm-packages.mjs --templates",
+        "node scripts/test-package-npm.mjs",
+        "Ruby YAML parse",
+        "jq JSON parse",
+        "git diff --check 0349cc8..314cfb9"
+      ]
+    },
+    "codeReview": {
+      "recommendation": "APPROVE",
+      "architectStatus": "CLEAR",
+      "evidence": ".omx/artifacts/code-review-release-evidence-oidc-feedback-20260803T025124Z.md",
+      "independentReview": {
+        "codeReviewer": {
+          "agentRole": "code-reviewer",
+          "verdict": "APPROVE",
+          "snapshot": "314cfb94384056c057b61aae072f0ae1799748b3"
+        },
+        "architect": {
+          "agentRole": "architect",
+          "verdict": "CLEAR",
+          "snapshot": "314cfb94384056c057b61aae072f0ae1799748b3"
+        }
+      }
+    },
+    "architectureInvariantGate": {
+      "status": "passed",
+      "sourceArtifacts": [
+        ".omx/ultragoal/brief.md",
+        ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
+        ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md"
+      ],
+      "invariants": [
+        "Release evidence separates tagged workflow, manual npm publication, and dated registry observations.",
+        "The npm workflow has no long-lived write-token environment variable and is gated by tag plus PUBLISH_NPM.",
+        "publish-order.txt is the sole staging-order authority; unproven stage IDs are not inferred by CI.",
+        "Public feedback forms do not ask for source, diffs, raw output, paths, chats, tokens, credentials, or customer data.",
+        "Npm publisher setup, approval, dist-tag changes, and GitHub Discussions remain explicit owner-controlled actions."
+      ],
+      "evidence": "Final independent architect CLEAR at 314cfb9 and exact-head verification in the code-review artifact."
+    }
+  }
 }
