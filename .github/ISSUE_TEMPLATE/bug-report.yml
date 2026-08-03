@@ -1,0 +1,61 @@
+name: Bug report
+description: Report reproducible Relay behavior without attaching sensitive work artifacts.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Privacy first
+        Do **not** paste source code, diffs, terminal output, absolute paths, chats, tokens, credentials, customer data, or raw Relay evidence. For a potential vulnerability, use the private security-reporting link instead.
+  - type: input
+    id: version
+    attributes:
+      label: Relay version or commit
+      description: "Example: 0.2.0-rc.6. Do not include a local path."
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS Apple Silicon
+        - macOS Intel
+        - Linux x64
+        - Unsupported or other
+    validations:
+      required: true
+  - type: dropdown
+    id: install_method
+    attributes:
+      label: Installation method
+      options:
+        - npm
+        - Homebrew
+        - GitHub Release binary
+        - Source build
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: Describe the behavior only. Do not include project names, paths, commands, logs, or source.
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Summarize the visible outcome only. Do not paste raw output, diagnostics, or any sensitive data.
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy confirmation
+      options:
+        - label: I removed sensitive work artifacts and understand that public issues are not for security reports.
+          required: true

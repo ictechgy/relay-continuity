@@ -1,7 +1,10 @@
 {
   "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
   "omxAvailable": false,
-  "status": "complete",
+  "status": "in_progress",
+  "activeGoal": "G106",
+  "plan": ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
+  "testSpec": ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md",
   "implementationReview": {
     "snapshot": "75b55126d710ae8062be9578807040683fa41532",
     "verdicts": {
@@ -43,8 +46,49 @@
   "releaseBoundary": {
     "repository": "https://github.com/ictechgy/relay-continuity",
     "version": "0.2.0-rc.6",
-    "tagAndRelease": "not-created",
-    "requiredBeforePublishing": "Review the tagged workflow artifacts and SHA-256 checksums."
+    "tag": {
+      "name": "v0.2.0-rc.6",
+      "commit": "06ce504ec032c1f0450ed18d061e060726053ed3"
+    },
+    "release": {
+      "url": "https://github.com/ictechgy/relay-continuity/releases/tag/v0.2.0-rc.6",
+      "publishedAt": "2026-08-02T12:18:39Z",
+      "prerelease": true,
+      "assets": {
+        "relay-macos-arm64": "9c5c2a40d04b048dc0ba6b7196be5d2a2d89cdd2732e15b3a5481b311e618715",
+        "relay-macos-x86_64": "60bef1a7a4c09bf959b1c1337f784b96d411bfd257711d5c5c50ac29824787fc",
+        "relay-linux-x86_64": "493c5c3d9d0e1095c6219bb9d046fd91542fcbc00098d0e5944a2d62187b379b"
+      }
+    },
+    "taggedWorkflow": {
+      "url": "https://github.com/ictechgy/relay-continuity/actions/runs/30747458973",
+      "conclusion": "success",
+      "jobs": {
+        "archive-macos-arm64": "success",
+        "archive-macos-x86_64": "success",
+        "archive-linux-x86_64": "success",
+        "npm-packages": "success",
+        "npm-publish": "skipped"
+      },
+      "npmPublicationInference": "none; the job was skipped because PUBLISH_NPM was disabled"
+    },
+    "manualNpmPublication": {
+      "status": "published",
+      "distTagRequested": "next",
+      "evidence": "Manual maintainer publication after the tagged workflow; separate from GitHub Actions evidence."
+    },
+    "registryObservation": {
+      "observedAt": "2026-08-02",
+      "source": "npm view",
+      "packages": {
+        "@ictechgy/relay": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" },
+        "@ictechgy/relay-darwin-arm64": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" },
+        "@ictechgy/relay-darwin-x64": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" },
+        "@ictechgy/relay-linux-x64": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" }
+      },
+      "limits": "This is a dated external registry observation, not a claim about a future tag or workflow outcome."
+    },
+    "requiredBeforeFuturePublishing": "Review the tagged workflow artifacts, stage summary, SHA-256 checksums, and staged tarballs before owner 2FA approval."
   },
   "remainingProductLimits": [
     "Claude and Grok automatic context injection remain unavailable until their installed, authenticated hook contracts prove safe.",
