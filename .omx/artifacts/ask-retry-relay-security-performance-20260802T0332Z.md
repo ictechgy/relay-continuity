@@ -12,9 +12,9 @@ Retry Claude and Agy after Claude login, then send the full Relay diff to Grok u
 
 ## Invocation records
 
-1. Claude `2.1.220`, `/Users/coden/.local/bin/claude`, `claude -p --tools '' --no-session-persistence --safe-mode --strict-mcp-config --setting-sources ''`; authenticated; exact diff sent through stdin; exit 143 after a complete response was emitted but the process failed to exit.
-2. Agy `1.1.9`, `/Users/coden/.local/bin/agy`, `agy --sandbox --disable-slash-commands --print-timeout 5m --output-format text -p <packet>`; exact diff supplied; exit 0.
-3. Grok `0.2.114`, `/Users/coden/.grok/bin/grok`, `grok --tools '' --no-memory --disable-web-search --no-subagents --permission-mode dontAsk --prompt-file /dev/stdin --output-format plain`; exact diff sent under owner authorization; exit 0.
+1. Claude `2.1.220`, executable `claude` (local path redacted), `claude -p --tools '' --no-session-persistence --safe-mode --strict-mcp-config --setting-sources ''`; authenticated; exact diff sent through stdin; exit 143 after a complete response was emitted but the process failed to exit.
+2. Agy `1.1.9`, executable `agy` (local path redacted), `agy --sandbox --disable-slash-commands --print-timeout 5m --output-format text -p <packet>`; exact diff supplied; exit 0.
+3. Grok `0.2.114`, executable `grok` (local path redacted), `grok --tools '' --no-memory --disable-web-search --no-subagents --permission-mode dontAsk --prompt-file /dev/stdin --output-format plain`; exact diff sent under owner authorization; exit 0.
 
 ## Raw CLI output
 

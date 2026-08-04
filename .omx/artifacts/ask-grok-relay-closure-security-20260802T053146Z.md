@@ -15,9 +15,9 @@ new review.
 ## Backend and prompt
 
 - Backend: Grok Build 0.2.118
-- Resolved executable: `/Users/coden/.grok/bin/grok`
+- Resolved executable: `grok` (local path redacted)
 - UTC start: `2026-08-02T05:31:46Z`
-- CWD: `/Users/coden/relay`
+- CWD: repository root (`.`)
 - Controls: empty tool allowlist, web disabled, memory disabled, subagents
   disabled, and `dontAsk` permissions.
 - Prompt contract: independently assess the two prior findings using the exact
@@ -27,7 +27,7 @@ new review.
 ## Invocation
 
 ```text
-/Users/coden/.grok/bin/grok -p <review-packet> --tools "" --disable-web-search --no-memory --no-subagents --permission-mode dontAsk --output-format plain
+grok -p <review-packet> --tools "" --disable-web-search --no-memory --no-subagents --permission-mode dontAsk --output-format plain
 ```
 
 Exit code: 0

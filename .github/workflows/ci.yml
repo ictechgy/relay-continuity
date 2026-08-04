@@ -31,6 +31,15 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --all-targets --all-features --locked -- -D warnings
       - run: cargo build --release --locked
+      - name: Verify adversarial systemd service rendering
+        if: runner.os == 'Linux'
+        run: |
+          fixture="$(mktemp -d)"
+          executable="$fixture/relay \$HOME/%h/한글"
+          mkdir -p "$(dirname "$executable")"
+          cp target/release/relay "$executable"
+          "$executable" integration service plan systemd > "$fixture/relay.service"
+          systemd-analyze verify "$fixture/relay.service"
       - name: Validate distribution scripts
         run: |
           node --check packages/relay/bin/relay.js
@@ -38,8 +47,12 @@ jobs:
           node --check scripts/stage-npm-packages.mjs
           node --check scripts/verify-npm-packages.mjs
           node --check scripts/test-package-npm.mjs
+          node --check scripts/verify-public-artifacts.mjs
+          node --check scripts/test-public-artifacts.mjs
           node scripts/verify-npm-packages.mjs --templates
           node scripts/test-package-npm.mjs
+          node scripts/verify-public-artifacts.mjs
+          node scripts/test-public-artifacts.mjs
           node --check scripts/render-homebrew-formula.mjs
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
           test -n "$version"

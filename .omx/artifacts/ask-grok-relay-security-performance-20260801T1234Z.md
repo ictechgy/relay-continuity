@@ -6,14 +6,14 @@ Fix the identified Relay security and performance findings, run a Cargo CVE audi
 
 ## Backend and final prompt
 
-- Backend: `/Users/coden/.grok/bin/grok` version `0.2.114`.
+- Backend: `grok` version `0.2.114` (local path redacted).
 - Immutable scope: `6e3a69809249561600e61761fc41442f1a26c7a1..c07f6820fcdace3f6e334d8ac6b73fa1799b236b`.
 - Exact diff SHA-256: `d04b936dbdafb89a5e78f91c325c043acf591d6337a49e8b5a7fd2308e0f80b1`.
 - Prompt transport: `/dev/stdin`, using the same explicit contract and exact diff as the Claude packet. Controls: `--tools '' --no-memory --disable-web-search --no-subagents --permission-mode dontAsk`.
 
 ## Invocation records
 
-1. 2026-08-01T12:36Z; cwd `/Users/coden/relay`; resolved executable `/Users/coden/.grok/bin/grok`; argv redacted to `grok --tools '' --no-memory --disable-web-search --no-subagents --permission-mode dontAsk --prompt-file /dev/stdin --output-format plain`; exit unavailable because the process did not exit after repeated DNS failures and was stopped after its fifth retry.
+1. 2026-08-01T12:36Z; cwd repository root (`.`); resolved executable `grok` (local path redacted); argv redacted to `grok --tools '' --no-memory --disable-web-search --no-subagents --permission-mode dontAsk --prompt-file /dev/stdin --output-format plain`; exit unavailable because the process did not exit after repeated DNS failures and was stopped after its fifth retry.
 
 ## Raw CLI output
 
