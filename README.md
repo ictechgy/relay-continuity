@@ -5,7 +5,7 @@ It records Git snapshots and explicit check outcomes locally, then renders a sma
 resume card. It does not store source bodies, raw diffs, chats, telemetry, or
 raw command output.
 
-> v0.2.0-rc.7 is a prerelease. It is not a transcript recovery tool and
+> v0.2.0-rc.8 is a prerelease. It is not a transcript recovery tool and
 > cannot universally observe an AI tool's quota, internal reasoning, or UI.
 
 ## Trust model

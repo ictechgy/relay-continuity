@@ -79,7 +79,7 @@ render the Formula from the release repository:
 
 ```sh
 node scripts/render-homebrew-formula.mjs \
-  --version 0.2.0-rc.7 \
+  --version 0.2.0-rc.8 \
   --macos-arm64 <sha256> \
   --macos-x64 <sha256> \
   --linux-x64 <sha256> > Formula/relay.rb

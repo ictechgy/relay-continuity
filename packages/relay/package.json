@@ -1,6 +1,6 @@
 {
   "name": "@ictechgy/relay",
-  "version": "0.2.0-rc.7",
+  "version": "0.2.0-rc.8",
   "description": "Local, evidence-first continuity for AI-assisted software work",
   "license": "MIT",
   "repository": {
@@ -17,8 +17,8 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@ictechgy/relay-darwin-arm64": "0.2.0-rc.7",
-    "@ictechgy/relay-darwin-x64": "0.2.0-rc.7",
-    "@ictechgy/relay-linux-x64": "0.2.0-rc.7"
+    "@ictechgy/relay-darwin-arm64": "0.2.0-rc.8",
+    "@ictechgy/relay-darwin-x64": "0.2.0-rc.8",
+    "@ictechgy/relay-linux-x64": "0.2.0-rc.8"
   }
 }
