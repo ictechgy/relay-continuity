@@ -15,7 +15,7 @@
     {"id":"G108","title":"Replace racy PID-file writer ownership with crash-safe mutual exclusion","status":"complete","findings":["R-03"]},
     {"id":"G109","title":"Bound evidence database work, retention, and path persistence transactions","status":"complete","findings":["R-01","R-06","R-07"]},
     {"id":"G107B","title":"Make daemon capture resilient and watcher load bounded","status":"complete","findings":["R-04","R-05"]},
-    {"id":"G110","title":"Strengthen npm and release provenance plus distribution edge cases","status":"in_progress","findings":["R-08","R-09","R-10","R-12"]},
-    {"id":"G111","title":"Prove final performance, privacy, compatibility, and review gates","status":"pending","findings":[]}
+    {"id":"G110","title":"Strengthen npm and release provenance plus distribution edge cases","status":"complete","findings":["R-08","R-09","R-10","R-12"]},
+    {"id":"G111","title":"Prove final performance, privacy, compatibility, and review gates","status":"in_progress","findings":[]}
   ]
 }

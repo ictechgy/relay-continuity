@@ -7,6 +7,10 @@ permissions:
   contents: read
 jobs:
   archive:
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +33,9 @@ jobs:
       - run: cargo build --release --locked
       - run: mv target/release/relay relay-${{ matrix.asset }}
       - run: shasum -a 256 relay-${{ matrix.asset }} > relay-${{ matrix.asset }}.sha256
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: relay-${{ matrix.asset }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: relay-${{ matrix.asset }}
@@ -46,12 +53,27 @@ jobs:
         with:
           pattern: relay-*
           path: release-assets
+          merge-multiple: true
+      - name: Verify native build provenance
+        env:
+          SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
+        run: |
+          for asset in linux-x86_64 macos-x86_64 macos-arm64; do
+            gh attestation verify "release-assets/relay-$asset" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$SIGNER_WORKFLOW" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
       - name: Package npm distribution
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
           test -n "$version"
           node scripts/package-npm.mjs --artifacts release-assets --output dist/npm --version "$version"
-          node scripts/verify-npm-packages.mjs --output dist/npm
+          node scripts/verify-npm-packages.mjs \
+            --output dist/npm \
+            --artifacts release-assets
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: npm-packages

@@ -13,9 +13,11 @@ Relay's managed-state safety model.
 
 ## Publishing npm packages
 
-The release workflow turns verified GitHub Actions binaries into four tarballs:
-three platform packages, followed by the wrapper package. The wrapper must be
-staged and approved last so npm can resolve its exact optional dependencies.
+The release workflow gives each GitHub-hosted native build a GitHub artifact
+attestation, verifies that attestation against the exact repository, workflow,
+Git ref, and commit, and then turns those binaries into four tarballs: three
+platform packages, followed by the wrapper package. The wrapper must be staged
+and approved last so npm can resolve its exact optional dependencies.
 
 Relay uses npm trusted publishing with GitHub Actions OIDC, not an `NPM_TOKEN`
 repository secret. The tag workflow uses Node 24 and npm 11.15 or later to
@@ -40,7 +42,10 @@ In each package's npm settings, select GitHub Actions and set:
 The package metadata must continue to identify
 `git+https://github.com/ictechgy/relay-continuity.git` as its repository. The
 release workflow validates that metadata in templates and packed tarballs before
-the staging job can run.
+the staging job can run. It also extracts each packed native binary with a byte
+limit and requires its SHA-256 to match both the attested release artifact and
+the generated package payload. Package manifests with lifecycle scripts or
+bundled-dependency metadata are rejected.
 
 After confirming the first OIDC staging rehearsal succeeds, use each package's
 Publishing access setting to require 2FA and disallow tokens, then revoke any
@@ -51,9 +56,10 @@ owner-controlled actions; they are not performed by this repository. npm's
 source of truth for current account and CLI requirements.
 
 For a tagged release, download the `npm-stage-manifest` workflow artifact. It
-records the verified package, tarball, version, SHA-256 digest, and immutable
-`next` dist-tag in staging order. Before staging, CI recomputes each digest from
-the downloaded tarball and compares it to the package artifact manifest. CI
+records the verified package, tarball, version, tarball SHA-256, native-binary
+SHA-256 where applicable, and immutable `next` dist-tag in staging order.
+Before staging, CI recomputes each digest from the downloaded tarball and
+compares it to the package artifact manifest. CI
 deliberately does not guess or parse a stage ID from npm command output. In npm's
 Staged Packages UI (or with an authenticated maintainer CLI session), find each
 package/version from that manifest, record its stage ID, and download the staged

@@ -15,7 +15,13 @@ const expectedPackages = [
 ];
 
 function usage() {
-  throw new Error("usage: stage-npm-packages.mjs --tarballs <dir> --order <file> --manifest <file> --output <file> [--dry-run]");
+  throw new Error(
+    "usage: stage-npm-packages.mjs --tarballs <dir> --order <file> --manifest <file> --output <file> [--dry-run]"
+  );
+}
+
+function hasExactKeys(value, expected) {
+  return JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 
 async function sha256(path) {
@@ -50,7 +56,12 @@ function readArguments(argv) {
 async function stagedInputs(arguments_) {
   const manifest = JSON.parse(await readFile(arguments_.manifest, "utf8"));
   const order = (await readFile(arguments_.order, "utf8")).trim().split("\n").filter(Boolean);
-  if (!Array.isArray(manifest.packages) || manifest.packages.length !== expectedPackages.length) {
+  if (
+    !hasExactKeys(manifest, ["version", "packages"]) ||
+    typeof manifest.version !== "string" ||
+    !Array.isArray(manifest.packages) ||
+    manifest.packages.length !== expectedPackages.length
+  ) {
     throw new Error("publish manifest must contain exactly four packages");
   }
   if (order.length !== expectedPackages.length || new Set(order).size !== order.length) {
@@ -60,11 +71,18 @@ async function stagedInputs(arguments_) {
   const byTarball = new Map(manifest.packages.map((entry) => [entry.tarball, entry]));
   const inputs = await Promise.all(order.map(async (tarball, index) => {
     const entry = byTarball.get(tarball);
+    const platformPackage = index < expectedPackages.length - 1;
+    const expectedKeys = platformPackage
+      ? ["name", "tarball", "version", "sha256", "binarySha256"]
+      : ["name", "tarball", "version", "sha256"];
     if (
       !entry ||
+      !hasExactKeys(entry, expectedKeys) ||
       entry.name !== expectedPackages[index] ||
-      typeof entry.version !== "string" ||
-      !/^[a-f0-9]{64}$/.test(entry.sha256)
+      entry.version !== manifest.version ||
+      !/^[a-f0-9]{64}$/.test(entry.sha256) ||
+      (platformPackage && !/^[a-f0-9]{64}$/.test(entry.binarySha256)) ||
+      (!platformPackage && Object.hasOwn(entry, "binarySha256"))
     ) {
       throw new Error(`publish order does not match expected package at position ${index + 1}`);
     }
@@ -75,7 +93,14 @@ async function stagedInputs(arguments_) {
     if ((await sha256(path)) !== entry.sha256) {
       throw new Error(`tarball checksum mismatch for ${entry.name}: ${tarball}`);
     }
-    return { package: entry.name, tarball, version: entry.version, sha256: entry.sha256, path };
+    return {
+      package: entry.name,
+      tarball,
+      version: entry.version,
+      sha256: entry.sha256,
+      ...(entry.binarySha256 ? { binarySha256: entry.binarySha256 } : {}),
+      path
+    };
   }));
   if (byTarball.size !== inputs.length || manifest.packages.some((entry) => !order.includes(entry.tarball))) {
     throw new Error("publish manifest and publish order must contain the same tarballs");
@@ -105,14 +130,30 @@ const stages = [];
 
 if (arguments_.dryRun) {
   for (const entry of inputs) {
-    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, sha256: entry.sha256, distTag: "next", status: "validated" });
+    stages.push({
+      package: entry.package,
+      tarball: entry.tarball,
+      version: entry.version,
+      sha256: entry.sha256,
+      ...(entry.binarySha256 ? { binarySha256: entry.binarySha256 } : {}),
+      distTag: "next",
+      status: "validated"
+    });
   }
   await writeReceipt(arguments_.output, version, "validated", stages);
 } else {
   await writeReceipt(arguments_.output, version, "staging", stages);
   for (const entry of inputs) {
     stage(entry.path);
-    stages.push({ package: entry.package, tarball: entry.tarball, version: entry.version, sha256: entry.sha256, distTag: "next", status: "staged" });
+    stages.push({
+      package: entry.package,
+      tarball: entry.tarball,
+      version: entry.version,
+      sha256: entry.sha256,
+      ...(entry.binarySha256 ? { binarySha256: entry.binarySha256 } : {}),
+      distTag: "next",
+      status: "staged"
+    });
     await writeReceipt(arguments_.output, version, "staging", stages);
   }
   await writeReceipt(arguments_.output, version, "staged", stages);

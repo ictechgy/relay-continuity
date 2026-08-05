@@ -26,6 +26,12 @@ keeps running but writes no new snapshot evidence until a bounded no-follow
 refresh succeeds. Transient Git failures are retried. Only fixed degradation
 categories are stored or displayed; raw diagnostics and paths are not retained.
 
+Tagged native builds receive GitHub artifact attestations scoped to the exact
+repository, release workflow, Git ref, and commit. npm packaging verifies those
+attestations first, then requires each bounded packed native payload to match
+the attested binary and its SHA-256. Package lifecycle scripts and bundled
+dependency metadata are rejected before staging.
+
 ## Reporting a vulnerability
 
 Please use [GitHub private vulnerability reporting](https://github.com/ictechgy/relay-continuity/security/advisories/new)

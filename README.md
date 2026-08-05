@@ -31,9 +31,10 @@ tap:
 brew install ictechgy/tap/relay
 ```
 
-Release binaries are currently unsigned prereleases. Verify their SHA-256
-checksums before bypassing any platform warning. For development or a source
-install, use Rust 1.97.1 with `rustup`:
+Release binaries are currently prereleases without Apple or other platform code
+signing. Tagged workflows issue GitHub build-provenance attestations; verify an
+asset's attestation and SHA-256 before bypassing any platform warning. For
+development or a source install, use Rust 1.97.1 with `rustup`:
 
 ```sh
 git clone https://github.com/ictechgy/relay-continuity.git
@@ -75,8 +76,9 @@ platform-specific release binaries.
 
 `cargo test` runs the local test suite. The project is local-only by design.
 Tags beginning with `v` build a macOS and Linux binary plus a SHA-256 checksum
-for each platform in GitHub Actions. Before publishing a public release, review
-the workflow artifacts and checksums for the tagged commit.
+and GitHub artifact attestation for each platform. Before publishing a public
+release, verify the workflow artifacts, attestations, and checksums against the
+tagged commit.
 The checked-in `rust-toolchain.toml` pins release and CI builds to Rust 1.97.1
 so a tag is rebuilt with the same compiler version.
 

@@ -75,6 +75,7 @@ const artifacts = resolve(arguments_.artifacts);
 const output = resolve(arguments_.output);
 const packages = join(output, "packages");
 const tarballs = join(output, "tarballs");
+const binaryDigests = new Map();
 
 await rm(output, { recursive: true, force: true });
 await mkdir(packages, { recursive: true });
@@ -86,9 +87,11 @@ for (const [packageDirectory, artifactName] of platformPackages) {
   const checksumFile = await findFile(artifacts, `${artifactName}.sha256`);
   if (!checksumFile) throw new Error(`missing release checksum: ${artifactName}.sha256`);
   const expected = (await readFile(checksumFile, "utf8")).trim().split(/\s+/)[0];
-  if (!/^[a-f0-9]{64}$/.test(expected) || (await sha256(source)) !== expected) {
+  const sourceDigest = await sha256(source);
+  if (!/^[a-f0-9]{64}$/.test(expected) || sourceDigest !== expected) {
     throw new Error(`release checksum mismatch: ${artifactName}`);
   }
+  binaryDigests.set(packageDirectory, sourceDigest);
   const destination = join(packages, packageDirectory);
   await copyPackage(join(root, "packages", packageDirectory), destination, arguments_.version);
   await mkdir(join(destination, "bin"), { recursive: true });
@@ -106,12 +109,15 @@ for (const directory of [...platformPackages.map(([name]) => name), "relay"]) {
   packed.push(basename(filename));
   const manifest = JSON.parse(await readFile(join(packages, directory, "package.json"), "utf8"));
   const tarball = basename(filename);
-  publishManifest.push({
+  const entry = {
     name: manifest.name,
     tarball,
     version: manifest.version,
     sha256: await sha256(join(tarballs, tarball))
-  });
+  };
+  const binarySha256 = binaryDigests.get(directory);
+  if (binarySha256) entry.binarySha256 = binarySha256;
+  publishManifest.push(entry);
 }
 await writeFile(join(output, "publish-order.txt"), `${packed.join("\n")}\n`);
 await writeFile(join(output, "publish-manifest.json"), `${JSON.stringify({ version: arguments_.version, packages: publishManifest }, null, 2)}\n`);
