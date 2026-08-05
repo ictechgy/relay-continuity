@@ -45,6 +45,9 @@ jobs:
   npm-packages:
     needs: archive
     runs-on: ubuntu-latest
+    permissions:
+      attestations: read
+      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -56,6 +59,7 @@ jobs:
           merge-multiple: true
       - name: Verify native build provenance
         env:
+          GH_TOKEN: ${{ github.token }}
           SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
         run: |
           for asset in linux-x86_64 macos-x86_64 macos-arm64; do

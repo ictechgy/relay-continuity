@@ -34,9 +34,10 @@
 6. **Distribution provenance and least authority: PASS for repository state.**
    Pinned `actions/attest` creates native build attestations with job-scoped
    `contents: read`, `id-token: write`, and `attestations: write`. Packaging
-   verifies repository, workflow, ref, commit, and hosted-runner provenance,
-   then requires the bounded packed binary digest to match the attested artifact
-   and checksum. No long-lived npm token was introduced.
+   verifies repository, workflow, ref, commit, and hosted-runner provenance with
+   a short-lived token limited to content and attestation reads, then requires
+   the bounded packed binary digest to match the attested artifact and checksum.
+   No long-lived npm or GitHub token was introduced.
 
 7. **Platform-before-wrapper and owner-controlled publication: PASS.** Exact
    manifest schema and publish order preserve three platform packages before the

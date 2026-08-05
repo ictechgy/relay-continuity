@@ -18,6 +18,8 @@ attestation, verifies that attestation against the exact repository, workflow,
 Git ref, and commit, and then turns those binaries into four tarballs: three
 platform packages, followed by the wrapper package. The wrapper must be staged
 and approved last so npm can resolve its exact optional dependencies.
+Verification uses only the packaging job's short-lived, read-only GitHub token;
+it does not introduce a personal or long-lived release credential.
 
 Relay uses npm trusted publishing with GitHub Actions OIDC, not an `NPM_TOKEN`
 repository secret. The tag workflow uses Node 24 and npm 11.15 or later to

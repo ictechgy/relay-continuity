@@ -70,7 +70,14 @@ try {
     ["/opt/homebrew/opt/openssl@3/bin/openssl", "Homebrew Cellar or opt absolute path"],
     ["/usr/local/Cellar/node/24.4.1/bin/node", "Homebrew Cellar or opt absolute path"],
     ["/usr/local/opt/node/bin/node", "Homebrew Cellar or opt absolute path"],
-    ["/nix/store/example-hash/bin/agy", "Nix workstation-local tool path"]
+    ["/nix/store/example-hash/bin/agy", "Nix workstation-local tool path"],
+    ["file:///Users/alice/.local/bin/claude", "macOS or Linux user-home absolute path"],
+    [
+      "file://localhost/home/alice/.local/bin/agy",
+      "macOS or Linux user-home absolute path"
+    ],
+    ["file:/private/tmp/relay-worktree/review.md", "temporary workspace absolute path"],
+    ["file:///C:/Users/Alice/bin/grok.exe", "Windows user-home absolute path"]
   ];
   await writeFile(tracked, "placeholder\n");
   run("git", ["add", ".omx/artifacts/tracked.md"], fixture);
@@ -87,6 +94,9 @@ try {
     "tools/opt/homebrew/bin/claude",
     "fixtures/usr/local/Cellar/node/readme.md",
     "fixtures/nix/store/example-hash/bin/agy",
+    "문서/Users/alice/readme.md",
+    "📁/private/tmp/case.md",
+    String.raw`자료\C:\Users\Alice\bin\grok.exe`,
     String.raw`fixtures\\C:\\Users\\Alice\\bin\\grok.exe`,
     "fixtures//build-host/Users/Alice/bin/grok.exe"
   ];

@@ -13,35 +13,35 @@ const MAX_ISSUES = 50;
 const prohibitedPaths = [
   {
     label: "macOS or Linux user-home absolute path",
-    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/|(?=$|[\s"'`),.;:\]}]))/
+    pattern: /(?:^|[\s"'`(\[{=,:;])\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/|(?=$|[\s"'`),.;:\]}]))/
   },
   {
     label: "privileged Unix user-home absolute path",
-    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:var\/)?root(?:\/|(?=$|[\s"'`),.;:\]}]))/
+    pattern: /(?:^|[\s"'`(\[{=,:;])\/(?:var\/)?root(?:\/|(?=$|[\s"'`),.;:\]}]))/
   },
   {
     label: "temporary workspace absolute path",
-    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:tmp|private\/tmp|var\/tmp|var\/folders)(?:\/|(?=$|[\s"'`),.;:\]}]))/
+    pattern: /(?:^|[\s"'`(\[{=,:;])\/(?:tmp|private\/tmp|var\/tmp|var\/folders)(?:\/|(?=$|[\s"'`),.;:\]}]))/
   },
   {
     label: "Windows user-home absolute path",
-    pattern: /(?<![A-Za-z0-9._~+@%\\\/-])[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
+    pattern: /(?:^|[\s"'`(\[{=,:;])[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
   },
   {
     label: "UNC user-home absolute path",
-    pattern: /(?<![A-Za-z0-9._~+@%\\\/-])(?:\\{2,}|\/{2})[^\\/\s"'`<>]+[\\/]+(?:(?:[A-Za-z]\$|[^\\/\s"'`<>]+)[\\/]+)?(?:Users|home)[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
+    pattern: /(?:^|[\s"'`(\[{=,:;])(?:\\{2,}|\/{2})[^\\/\s"'`<>]+[\\/]+(?:(?:[A-Za-z]\$|[^\\/\s"'`<>]+)[\\/]+)?(?:Users|home)[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
   },
   {
     label: "workstation-local tool path",
-    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:opt\/homebrew|usr\/local)\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
+    pattern: /(?:^|[\s"'`(\[{=,:;])\/(?:opt\/homebrew|usr\/local)\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
   },
   {
     label: "Homebrew Cellar or opt absolute path",
-    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:opt\/homebrew|usr\/local)\/(?:Cellar|opt)\/[^\s"'`<>]+/i
+    pattern: /(?:^|[\s"'`(\[{=,:;])\/(?:opt\/homebrew|usr\/local)\/(?:Cellar|opt)\/[^\s"'`<>]+/i
   },
   {
     label: "Nix workstation-local tool path",
-    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/nix\/store\/[A-Za-z0-9._+-]+\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
+    pattern: /(?:^|[\s"'`(\[{=,:;])\/nix\/store\/[A-Za-z0-9._+-]+\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
   }
 ];
 
@@ -116,6 +116,14 @@ function mixedPayload(value) {
 
 function withoutRemoteUrls(line) {
   return line.replace(/\bhttps?:\/\/[^\s<>"'`]+/gi, "[remote-url]");
+}
+
+function withoutLocalFileUrlScheme(line) {
+  return line
+    .replace(/\bfile:\/\/localhost(?=\/)/gi, "")
+    .replace(/\bfile:\/\/\/(?=[A-Za-z]:[\\/])/gi, "")
+    .replace(/\bfile:\/\/(?=\/)/gi, "")
+    .replace(/\bfile:(?=\/)/gi, "");
 }
 
 function withoutDocumentedPlaceholders(line) {
@@ -222,7 +230,9 @@ async function scan(root, paths) {
     }
     for (const [index, line] of contents.split("\n").entries()) {
       const normalizedLine = normalized(line);
-      const pathLine = withoutDocumentedPlaceholders(withoutRemoteUrls(normalizedLine));
+      const pathLine = withoutDocumentedPlaceholders(
+        withoutRemoteUrls(withoutLocalFileUrlScheme(normalizedLine))
+      );
       for (const { label, pattern } of prohibitedPaths) {
         if (pattern.test(pathLine) && !record({ path, line: index + 1, label })) {
           break scanFiles;
