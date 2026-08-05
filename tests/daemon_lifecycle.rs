@@ -632,6 +632,196 @@ fn service_runner_bootstraps_a_fresh_git_checkout() {
 }
 
 #[test]
+fn unborn_repository_bootstraps_and_captures_the_first_commit() {
+    let root = std::env::temp_dir().join(format!(
+        "relay-unborn-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create unborn fixture");
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .status()
+            .expect("git init")
+            .success()
+    );
+    assert!(run(&root, &["init"]).status.success());
+    assert!(run(&root, &["daemon", "start"]).status.success());
+
+    fs::write(root.join("first.txt"), "first content").expect("write first file");
+    assert!(
+        Command::new("git")
+            .args(["add", "first.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Relay",
+                "-c",
+                "user.email=relay@example.test",
+                "commit",
+                "-m",
+                "first",
+            ])
+            .current_dir(&root)
+            .status()
+            .expect("first commit")
+            .success()
+    );
+
+    let mut captured = false;
+    for _ in 0..32 {
+        let database = Connection::open(state_database(&root)).expect("open evidence");
+        let head_changes: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='head-change'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count first head change");
+        if head_changes == 1 {
+            captured = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        captured,
+        "first commit was not captured from an unborn HEAD"
+    );
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn nested_changes_are_captured_by_bounded_root_watch_and_polling() {
+    let root = git_fixture("nested-polling-test");
+    fs::create_dir_all(root.join("nested")).expect("create nested directory");
+    fs::write(root.join("nested/tracked.txt"), "initial").expect("write nested fixture");
+    assert!(
+        Command::new("git")
+            .args(["add", "nested/tracked.txt"])
+            .current_dir(&root)
+            .status()
+            .expect("git add nested")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "-c",
+                "user.name=Relay",
+                "-c",
+                "user.email=relay@example.test",
+                "commit",
+                "-m",
+                "nested",
+            ])
+            .current_dir(&root)
+            .status()
+            .expect("commit nested")
+            .success()
+    );
+    assert!(run(&root, &["init"]).status.success());
+    assert!(run(&root, &["daemon", "start"]).status.success());
+
+    fs::write(root.join("nested/tracked.txt"), "changed").expect("change nested file");
+    let mut captured = false;
+    for _ in 0..16 {
+        let database = Connection::open(state_database(&root)).expect("open evidence");
+        let dirty: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='dirty-set'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count nested change");
+        if dirty == 1 {
+            captured = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(captured, "nested change was not reconciled by polling");
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn daemon_retries_transient_git_and_ignore_control_failures() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("daemon-degraded-test");
+    assert!(run(&root, &["init"]).status.success());
+    assert!(run(&root, &["daemon", "start"]).status.success());
+
+    fs::rename(root.join(".git"), root.join(".git-held")).expect("hide Git metadata");
+    let mut git_degraded = false;
+    for _ in 0..16 {
+        let degraded = fs::read_to_string(root.join(".relay/daemon.degraded")).unwrap_or_default();
+        if degraded.lines().nth(1) == Some("git-unavailable") {
+            git_degraded = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        git_degraded,
+        "daemon did not expose bounded Git degradation"
+    );
+    fs::rename(root.join(".git-held"), root.join(".git")).expect("restore Git metadata");
+
+    let ignore_target = root.join("ignore-target");
+    fs::write(&ignore_target, "generated/\n").expect("write ignore target");
+    symlink(&ignore_target, root.join(".relayignore")).expect("install unsafe ignore symlink");
+    let mut ignore_degraded = false;
+    for _ in 0..16 {
+        let degraded = fs::read_to_string(root.join(".relay/daemon.degraded")).unwrap_or_default();
+        if degraded.lines().nth(1) == Some("repository-control-unavailable") {
+            ignore_degraded = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        ignore_degraded,
+        "daemon did not fail closed on the unsafe ignore file"
+    );
+
+    fs::remove_file(root.join(".relayignore")).expect("remove unsafe ignore symlink");
+    fs::write(root.join(".relayignore"), "generated/\n").expect("restore ignore rules");
+    fs::write(root.join("tracked.txt"), "recovered").expect("write recovery change");
+    let mut recovered = false;
+    for _ in 0..24 {
+        let status = run(&root, &["daemon", "status"]);
+        let text = String::from_utf8_lossy(&status.stdout);
+        if status.status.success()
+            && (text.contains("Capture: active") || text.contains("watcher-polling"))
+        {
+            recovered = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        recovered,
+        "daemon did not recover after controls were restored"
+    );
+    assert!(run(&root, &["daemon", "stop"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     let root = std::env::temp_dir().join(format!(
         "relay-daemon-test-{}",

@@ -1033,6 +1033,7 @@ fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
     let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
     let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
     let nonce = format!(
         "service-{}",
         &hash(format!("{}:{}", root.display(), std::process::id()).as_bytes())[..16]
@@ -1499,15 +1500,50 @@ fn db(_root: &Path) -> Result<Connection, Box<dyn std::error::Error>> {
     Err("Relay managed state requires Unix descriptor-relative file operations; Windows is not supported"
         .into())
 }
+#[derive(Debug)]
+struct GitUnavailable;
+impl std::fmt::Display for GitUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Git state is unavailable; no Relay evidence was written")
+    }
+}
+impl std::error::Error for GitUnavailable {}
+fn git_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.downcast_ref::<GitUnavailable>().is_some()
+}
 fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let output = Command::new("git").args(args).current_dir(root).output()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|_| GitUnavailable)?;
     if !output.status.success() {
-        return Err("Git state is unavailable; no Relay evidence was written".into());
+        return Err(GitUnavailable.into());
     }
     Ok(output.stdout)
 }
 fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
     Ok(String::from_utf8(git_bytes(root, args)?)?.trim().to_owned())
+}
+fn git_head(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let head = Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(root)
+        .output()
+        .map_err(|_| GitUnavailable)?;
+    if head.status.success() {
+        return Ok(String::from_utf8(head.stdout)?.trim().to_owned());
+    }
+    let symbolic = Command::new("git")
+        .args(["symbolic-ref", "--quiet", "HEAD"])
+        .current_dir(root)
+        .output()
+        .map_err(|_| GitUnavailable)?;
+    if symbolic.status.success() {
+        Ok("unborn".to_owned())
+    } else {
+        Err(GitUnavailable.into())
+    }
 }
 struct DirtyEntry {
     code: String,
@@ -1669,7 +1705,7 @@ struct RepositoryState {
 fn repository_state(root: &Path) -> Result<RepositoryState, Box<dyn std::error::Error>> {
     let entries = dirty_entries(root)?;
     Ok(RepositoryState {
-        head: git(root, &["rev-parse", "HEAD"])?,
+        head: git_head(root)?,
         branch: git(root, &["branch", "--show-current"])?,
         dirty: dirty_summary(&entries),
         dirty_count: entries.len(),
@@ -1745,7 +1781,7 @@ fn observe_with_rules(
     let _lock = writer_lock(root)?;
     let entries = dirty_entries_with_rules(root, ignore_rules)?;
     let state = RepositoryState {
-        head: git(root, &["rev-parse", "HEAD"])?,
+        head: git_head(root)?,
         branch: git(root, &["branch", "--show-current"])?,
         dirty: dirty_summary(&entries),
         dirty_count: entries.len(),
@@ -1783,13 +1819,31 @@ fn observe_with_rules(
 fn observe(root: &Path, c: &Connection) -> Result<bool, Box<dyn std::error::Error>> {
     observe_with_rules(root, c, &IgnoreRules::load(root)?)
 }
-fn refresh_and_observe(
+fn daemon_reconcile(
     root: &Path,
     c: &Connection,
     ignore_rules: &mut IgnoreRules,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    ignore_rules.refresh(root)?;
-    observe_with_rules(root, c, ignore_rules)
+    nonce: &str,
+    polling_only: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if ignore_rules.refresh(root).is_err() {
+        write_daemon_degraded(root, nonce, "repository-control-unavailable")?;
+        return Ok(());
+    }
+    match observe_with_rules(root, c, ignore_rules) {
+        Ok(_) => {
+            if polling_only {
+                write_daemon_degraded(root, nonce, "watcher-polling")
+            } else {
+                clear_daemon_degraded(root)
+            }
+        }
+        Err(error) if writer_busy(error.as_ref()) => Ok(()),
+        Err(error) if git_unavailable(error.as_ref()) => {
+            write_daemon_degraded(root, nonce, "git-unavailable")
+        }
+        Err(error) => Err(error),
+    }
 }
 fn read_pid(root: &Path) -> Option<u32> {
     String::from_utf8(read_managed_file(root, &[".relay"], "daemon.pid").ok()?)
@@ -1805,6 +1859,45 @@ fn read_nonce(root: &Path) -> Option<String> {
         .lines()
         .nth(1)
         .map(str::to_owned)
+}
+fn write_daemon_degraded(
+    root: &Path,
+    nonce: &str,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !matches!(
+        reason,
+        "git-unavailable" | "repository-control-unavailable" | "watcher-polling"
+    ) {
+        return Err("Relay rejected an unknown daemon degradation state".into());
+    }
+    atomic_replace_managed(
+        root,
+        &[".relay"],
+        "daemon.degraded",
+        format!("{nonce}\n{reason}\n").as_bytes(),
+    )
+}
+fn clear_daemon_degraded(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match remove_managed_file(root, &[".relay"], "daemon.degraded") {
+        Ok(()) => Ok(()),
+        Err(error) if is_not_found(error.as_ref()) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+fn daemon_degraded_reason(root: &Path) -> Option<&'static str> {
+    let text =
+        String::from_utf8(read_managed_file(root, &[".relay"], "daemon.degraded").ok()?).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != read_nonce(root)? {
+        return None;
+    }
+    match lines.next()? {
+        "git-unavailable" => Some("git-unavailable"),
+        "repository-control-unavailable" => Some("repository-control-unavailable"),
+        "watcher-polling" => Some("watcher-polling"),
+        _ => None,
+    }
 }
 #[cfg(unix)]
 fn process_active(pid: u32) -> bool {
@@ -1836,11 +1929,13 @@ fn daemon_active(root: &Path) -> bool {
             .as_deref()
             == Some(nonce.as_str())
 }
-fn daemon_state(root: &Path) -> &'static str {
+fn daemon_state(root: &Path) -> String {
     if daemon_active(root) {
-        "active"
+        daemon_degraded_reason(root)
+            .map(|reason| format!("degraded ({reason})"))
+            .unwrap_or_else(|| "active".to_owned())
     } else {
-        "unavailable"
+        "unavailable".to_owned()
     }
 }
 fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1850,6 +1945,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
     let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
     let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
     let nonce = hash(
         format!(
             "{}:{:?}",
@@ -1887,6 +1983,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = atomic_replace_managed(root, &[".relay"], "daemon.stop", nonce.as_bytes());
     let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
     let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
+    let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
     Err("Relay daemon did not become ready".into())
 }
 fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1896,6 +1993,7 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if !daemon_active(root) {
         let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
         let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
+        let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
         return Err("Relay daemon state was stale; no process was stopped".into());
     }
     let nonce = read_nonce(root).ok_or("Relay daemon nonce is unavailable")?;
@@ -1905,6 +2003,7 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
             let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
             let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
+            let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
             println!("Relay daemon stopped");
             return Ok(());
         }
@@ -1925,16 +2024,21 @@ fn event_is_relevant(root: &Path, event: &Event, ignore_rules: &IgnoreRules) -> 
     })
 }
 fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let mut ignore_rules = IgnoreRules::load(root)?;
+    let mut ignore_rules = IgnoreRules::default();
     let (tx, rx) = channel();
-    let mut watcher = RecommendedWatcher::new(tx, Config::default())?;
-    watcher.watch(root, RecursiveMode::Recursive)?;
+    let poll_sender = tx.clone();
+    let watcher = match RecommendedWatcher::new(tx, Config::default()) {
+        Ok(mut watcher) => match watcher.watch(root, RecursiveMode::NonRecursive) {
+            Ok(()) => Some(watcher),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+    let mut polling_only = watcher.is_none();
+    let _watcher = watcher;
+    let _poll_sender = poll_sender;
     atomic_replace_managed(root, &[".relay"], "daemon.ready", nonce.as_bytes())?;
-    if let Err(error) = observe_with_rules(root, c, &ignore_rules)
-        && !writer_busy(error.as_ref())
-    {
-        return Err(error);
-    }
+    daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
     let mut last_reconcile = Instant::now();
     let mut pending: Option<Instant> = None;
     loop {
@@ -1946,76 +2050,55 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
         {
             let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
             let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
+            let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
             return Ok(());
         }
         let timeout = pending
             .map(|changed| Duration::from_millis(750).saturating_sub(changed.elapsed()))
-            // Stop-file writes are watched, so a 500 ms fallback preserves
-            // the stop acknowledgement budget without needless wakeups.
             .unwrap_or(Duration::from_millis(500));
         let received = rx.recv_timeout(timeout);
-        if let Ok(Ok(event)) = &received
-            && event_updates_ignore_rules(root, event)
-        {
-            ignore_rules.refresh(root)?;
+        if matches!(received, Ok(Err(_))) {
+            polling_only = true;
+            write_daemon_degraded(root, nonce, "watcher-polling")?;
         }
         match received {
-            // Keep the first event's deadline. Repeated relevant events must
-            // coalesce into one capture, not postpone it indefinitely.
-            Ok(Ok(event)) if event_is_relevant(root, &event, &ignore_rules) => {
+            Ok(Ok(event))
+                if event_updates_ignore_rules(root, &event)
+                    || event_is_relevant(root, &event, &ignore_rules) =>
+            {
                 pending.get_or_insert_with(Instant::now);
             }
-            // Ignored events can arrive continuously (for example a generated
-            // directory). They must not prevent an earlier relevant change
-            // from reaching its debounce deadline.
             Ok(Ok(_)) | Ok(Err(_))
                 if pending
                     .is_some_and(|changed| changed.elapsed() >= Duration::from_millis(750)) =>
             {
                 pending = None;
-                if let Err(error) = refresh_and_observe(root, c, &mut ignore_rules)
-                    && !writer_busy(error.as_ref())
-                {
-                    return Err(error);
-                }
+                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
                 last_reconcile = Instant::now();
             }
-            // Relay's own ignored writes can keep the watcher busy. Preserve
-            // the periodic Git reconciliation even when they arrive faster
-            // than the receive timeout.
             Ok(Ok(_)) | Ok(Err(_))
                 if pending.is_none() && last_reconcile.elapsed() >= Duration::from_secs(1) =>
             {
-                if let Err(error) = refresh_and_observe(root, c, &mut ignore_rules)
-                    && !writer_busy(error.as_ref())
-                {
-                    return Err(error);
-                }
+                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
                 last_reconcile = Instant::now();
             }
             Ok(Ok(_)) | Ok(Err(_)) => {}
             Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
-                if let Err(error) = refresh_and_observe(root, c, &mut ignore_rules)
-                    && !writer_busy(error.as_ref())
-                {
-                    return Err(error);
-                }
+                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
                 last_reconcile = Instant::now();
             }
             Err(RecvTimeoutError::Timeout) => {
-                // Filesystem events are the fast path. Reconcile only once
-                // every second when a platform coalesces or drops one.
                 if last_reconcile.elapsed() >= Duration::from_secs(1) {
-                    if let Err(error) = refresh_and_observe(root, c, &mut ignore_rules)
-                        && !writer_busy(error.as_ref())
-                    {
-                        return Err(error);
-                    }
+                    daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
                     last_reconcile = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                return Err("filesystem watcher disconnected".into());
+                polling_only = true;
+                write_daemon_degraded(root, nonce, "watcher-polling")?;
+                thread::sleep(Duration::from_millis(500));
+                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+                last_reconcile = Instant::now();
             }
         }
     }
@@ -2131,7 +2214,7 @@ fn card_for_audience(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let ignore_rules = IgnoreRules::load(root)?;
     let dirty_entries = dirty_entries_with_rules(root, &ignore_rules)?;
-    let head = git(root, &["rev-parse", "HEAD"])?;
+    let head = git_head(root)?;
     let branch = git(root, &["branch", "--show-current"])?;
     let now = hash(format!("{}\n{}\n{}", head, branch, dirty_summary(&dirty_entries)).as_bytes());
     let last: String = c
@@ -2261,7 +2344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &root,
                 &[".relay"],
                 ".gitignore",
-                b"evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\ndaemon.stop\nwriter.lock\n",
+                b"evidence.sqlite*\ncurrent.md\ndaemon.pid\ndaemon.ready\ndaemon.stop\ndaemon.degraded\nwriter.lock\n",
             )?;
             let exclude = root.join(".git/info/exclude");
             let existing = fs::read_to_string(&exclude).unwrap_or_default();

@@ -21,6 +21,11 @@ not permanent evidence: Relay stores at most 128 path rows per event and 4096
 overall, and `relay compact` retains only the most recent 512. Automatic AI
 context omits those names entirely.
 
+The daemon treats malformed or unsafe `.relayignore` state as fail-closed: it
+keeps running but writes no new snapshot evidence until a bounded no-follow
+refresh succeeds. Transient Git failures are retried. Only fixed degradation
+categories are stored or displayed; raw diagnostics and paths are not retained.
+
 ## Reporting a vulnerability
 
 Please use [GitHub private vulnerability reporting](https://github.com/ictechgy/relay-continuity/security/advisories/new)

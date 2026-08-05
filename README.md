@@ -80,12 +80,17 @@ the workflow artifacts and checksums for the tagged commit.
 The checked-in `rust-toolchain.toml` pins release and CI builds to Rust 1.97.1
 so a tag is rebuilt with the same compiler version.
 
-`relay init` creates local ignored state. `relay daemon start` runs a local
-filesystem watcher, debounces bursts for 750 ms, and records only a reconciled
-Git snapshot hash; `relay daemon stop` and `relay daemon status` manage and
-inspect that process. Stop is a nonce-checked local request; Relay never sends
-a signal to a PID from its state file. `relay status` always says whether generic capture is
-active and keeps semantic context explicitly `unknown` without an adapter.
+`relay init` creates local ignored state. `relay daemon start` watches only the
+repository root, debounces bursts for 750 ms, and reconciles Git once per second
+so nested changes are captured without recursively registering ignored build
+trees. Watcher registration failure falls back to polling. Transient Git or
+invalid `.relayignore` state pauses capture and reports a fixed privacy-safe
+degradation reason instead of terminating the daemon; capture resumes after
+the repository control state is valid again. `relay daemon stop` and
+`relay daemon status` manage and inspect that process. Stop is a nonce-checked
+local request; Relay never sends a signal to a PID from its state file. `relay
+status` always says whether generic capture is active and keeps semantic
+context explicitly `unknown` without an adapter.
 
 Evidence SQLite is deliberately stored outside the worktree: under
 `$XDG_STATE_HOME/relay/<worktree-hash>/` on Linux and
