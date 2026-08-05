@@ -2,7 +2,7 @@
   "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
   "omxAvailable": false,
   "status": "in_progress",
-  "currentGoal": "G108",
+  "currentGoal": "G109",
   "sourceReview": ".omx/artifacts/claude-relay-whole-review-summary-20260806.md",
   "sourceSnapshot": "632eb98678952d4deb2c1bf200c0df8ac67b2597",
   "requiredFinalGates": {

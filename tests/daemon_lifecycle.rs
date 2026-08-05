@@ -2,9 +2,9 @@ use rusqlite::Connection;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::{ffi::OsStrExt, io::AsRawFd};
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -1018,6 +1018,7 @@ fn daemon_restart_reconciles_work_queued_before_an_abrupt_exit() {
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_live_writer_lock_rejects_a_second_process_without_writing_evidence() {
     let root = git_fixture("writer-lock-test");
@@ -1027,11 +1028,18 @@ fn a_live_writer_lock_rejects_a_second_process_without_writing_evidence() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count baseline events");
     drop(database);
-    fs::write(
-        root.join(".relay/writer.lock"),
-        std::process::id().to_string(),
-    )
-    .expect("write live lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".relay/writer.lock"))
+        .expect("open writer lock");
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0,
+        "hold writer lock"
+    );
     let second_writer = run(&root, &["observe"]);
     assert!(!second_writer.status.success());
     assert!(String::from_utf8_lossy(&second_writer.stderr).contains("writer is busy"));
@@ -1040,6 +1048,56 @@ fn a_live_writer_lock_rejects_a_second_process_without_writing_evidence() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("count final events");
     assert_eq!(before, after);
-    fs::remove_file(root.join(".relay/writer.lock")).expect("remove test lock");
+    drop(lock);
+    assert!(run(&root, &["observe"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_observers_persist_one_snapshot_transition() {
+    let root = git_fixture("concurrent-writer-test");
+    assert!(run(&root, &["init"]).status.success());
+    fs::write(root.join("tracked.txt"), "one concurrent transition")
+        .expect("write concurrent transition");
+
+    let mut children = Vec::new();
+    for _ in 0..8 {
+        children.push(
+            Command::new(env!("CARGO_BIN_EXE_relay"))
+                .arg("observe")
+                .current_dir(&root)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("start concurrent observer"),
+        );
+    }
+    let mut successful = 0;
+    for child in children {
+        if child
+            .wait_with_output()
+            .expect("wait observer")
+            .status
+            .success()
+        {
+            successful += 1;
+        }
+    }
+    assert!(
+        successful >= 1,
+        "at least one observer must acquire the lock"
+    );
+
+    let database = Connection::open(state_database(&root)).expect("open evidence");
+    let dirty_events: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='dirty-set'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count dirty events");
+    assert_eq!(dirty_events, 1);
+    drop(database);
     fs::remove_dir_all(root).expect("remove fixture");
 }

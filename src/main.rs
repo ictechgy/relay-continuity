@@ -85,12 +85,6 @@ fn ensure_managed_directory(
     }
     Ok(())
 }
-fn ensure_relay_directory(
-    root: &Path,
-    create_missing: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    ensure_managed_directory(root, &[".relay"], create_missing)
-}
 fn ensure_integration_directory(
     root: &Path,
     create_missing: bool,
@@ -1232,43 +1226,57 @@ fn integration_command(
         ),
     }
 }
-struct WriterLock(PathBuf);
-impl Drop for WriterLock {
-    fn drop(&mut self) {
-        let _ = remove_managed_file(&self.0, &[".relay"], "writer.lock");
-    }
+#[cfg(unix)]
+struct WriterLock {
+    _file: fs::File,
 }
+#[cfg(not(unix))]
+struct WriterLock;
 fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
-    ensure_relay_directory(root, true)?;
-    for attempt in 0..=10 {
-        match create_new_managed_file(root, &[".relay"], "writer.lock") {
-            Ok(mut file) => {
-                write!(file, "{}", std::process::id())?;
-                file.sync_all()?;
-                return Ok(WriterLock(root.to_path_buf()));
-            }
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) =>
-            {
-                let owner = read_managed_file(root, &[".relay"], "writer.lock")
-                    .ok()
-                    .and_then(|text| String::from_utf8(text).ok())
-                    .and_then(|text| text.trim().parse::<u32>().ok());
-                if owner.is_none_or(|pid| !process_active(pid)) {
-                    let _ = remove_managed_file(root, &[".relay"], "writer.lock");
-                    continue;
-                }
-                if attempt == 10 {
-                    return Err("Relay writer is busy; retry without modifying evidence".into());
-                }
-                thread::sleep(Duration::from_millis(25));
-            }
-            Err(error) => return Err(error),
+    #[cfg(unix)]
+    {
+        let parent = managed_directory_no_follow(root, &[".relay"], true)?;
+        let name = managed_component("writer.lock")?;
+        let descriptor = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_CLOEXEC
+                    | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error().into());
         }
+        let file = unsafe { fs::File::from_raw_fd(descriptor) };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+            return Err("Relay rejected an unsafe writer lock file".into());
+        }
+        for attempt in 0..=10 {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(WriterLock { _file: file });
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(error.into());
+            }
+            if attempt == 10 {
+                return Err("Relay writer is busy; retry without modifying evidence".into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        unreachable!()
     }
-    Err("Relay writer is busy; retry without modifying evidence".into())
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        Err("Relay managed state requires Unix descriptor-relative file operations".into())
+    }
 }
 fn writer_busy(error: &dyn std::error::Error) -> bool {
     error.to_string() == "Relay writer is busy; retry without modifying evidence"
@@ -2667,17 +2675,48 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(relay_dir(&root)).unwrap();
+        fs::write(relay_dir(&root).join("writer.lock"), "legacy pid metadata").unwrap();
         let first = writer_lock(&root).unwrap();
         assert!(writer_lock(&root).is_err());
         assert!(relay_dir(&root).join("writer.lock").exists());
         drop(first);
-        assert!(writer_lock(&root).is_ok());
-        fs::write(relay_dir(&root).join("writer.lock"), "999999999").unwrap();
-        assert!(
-            writer_lock(&root).is_ok(),
-            "dead lock owner must be reclaimed"
+        let successor = writer_lock(&root).unwrap();
+        assert_eq!(
+            fs::read_to_string(relay_dir(&root).join("writer.lock")).unwrap(),
+            "legacy pid metadata"
         );
+        drop(successor);
+        assert!(relay_dir(&root).join("writer.lock").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn writer_lock_refuses_a_symlink_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!(
+            "relay-lock-symlink-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let outside = env::temp_dir().join(format!(
+            "relay-lock-symlink-target-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        fs::write(&outside, "PRECIOUS").unwrap();
+        symlink(&outside, relay_dir(&root).join("writer.lock")).unwrap();
+
+        assert!(writer_lock(&root).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "PRECIOUS");
+
+        fs::remove_dir_all(root).unwrap();
+        fs::remove_file(outside).unwrap();
     }
     #[test]
     fn ai_integration_card_omits_repository_names_and_preserves_operator_card() {
