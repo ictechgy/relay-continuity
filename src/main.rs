@@ -1314,6 +1314,7 @@ fn create_schema(c: &Connection) -> rusqlite::Result<()> {
       CREATE TABLE IF NOT EXISTS annotations(id INTEGER PRIMARY KEY, snapshot TEXT NOT NULL, text TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE TABLE IF NOT EXISTS adapter_metadata(id INTEGER PRIMARY KEY, provider TEXT NOT NULL, snapshot TEXT NOT NULL, metadata_hash TEXT NOT NULL, ts TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
       CREATE INDEX IF NOT EXISTS checks_snapshot_id ON checks(snapshot, id DESC);
+      CREATE INDEX IF NOT EXISTS event_paths_event_id ON event_paths(event_id, id);
       CREATE INDEX IF NOT EXISTS assertions_snapshot_id ON assertions(snapshot, id DESC);
       CREATE INDEX IF NOT EXISTS annotations_snapshot_id ON annotations(snapshot, id DESC);",
     )
@@ -1396,6 +1397,51 @@ fn open_database(path: &Path) -> rusqlite::Result<Connection> {
     )
 }
 #[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum DatabaseHeaderState {
+    MissingOrEmpty,
+    Sqlite,
+    Foreign,
+}
+#[cfg(unix)]
+fn database_header_state(path: &Path) -> Result<DatabaseHeaderState, Box<dyn std::error::Error>> {
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    let descriptor = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            return Ok(DatabaseHeaderState::MissingOrEmpty);
+        }
+        return Err(error.into());
+    }
+    let mut file = unsafe { fs::File::from_raw_fd(descriptor) };
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err("Relay rejected an unsafe evidence database file".into());
+    }
+    let mut header = [0_u8; 16];
+    let mut read = 0;
+    while read < header.len() {
+        let count = file.read(&mut header[read..])?;
+        if count == 0 {
+            break;
+        }
+        read += count;
+    }
+    Ok(if read == 0 {
+        DatabaseHeaderState::MissingOrEmpty
+    } else if read == header.len() && header == *b"SQLite format 3\0" {
+        DatabaseHeaderState::Sqlite
+    } else {
+        DatabaseHeaderState::Foreign
+    })
+}
+#[cfg(unix)]
 fn quarantine_database(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let suffix = format!(
         "corrupt-{}",
@@ -1435,10 +1481,7 @@ fn db(root: &Path) -> Result<Database, Box<dyn std::error::Error>> {
     let root = fs::canonicalize(root)?;
     let root = root.as_path();
     let path = database_path(root)?;
-    if fs::read(&path)
-        .ok()
-        .is_some_and(|bytes| !bytes.is_empty() && !bytes.starts_with(b"SQLite format 3\0"))
-    {
+    if database_header_state(&path)? == DatabaseHeaderState::Foreign {
         return recovered_db(root, &path);
     }
     let c = open_database(&path)?;
@@ -1617,27 +1660,28 @@ fn dirty_summary(entries: &[DirtyEntry]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
-fn dirty(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    Ok(dirty_summary(&dirty_entries(root)?))
-}
 struct RepositoryState {
     head: String,
     branch: String,
     dirty: String,
+    dirty_count: usize,
 }
 fn repository_state(root: &Path) -> Result<RepositoryState, Box<dyn std::error::Error>> {
+    let entries = dirty_entries(root)?;
     Ok(RepositoryState {
         head: git(root, &["rev-parse", "HEAD"])?,
         branch: git(root, &["branch", "--show-current"])?,
-        dirty: dirty(root)?,
+        dirty: dirty_summary(&entries),
+        dirty_count: entries.len(),
     })
 }
 fn state_detail(state: &RepositoryState) -> String {
     format!(
-        "head#{} branch#{} dirty#{}",
+        "head#{} branch#{} dirty#{} paths#{}",
         &hash(state.head.as_bytes())[..12],
         &hash(state.branch.as_bytes())[..12],
-        &hash(state.dirty.as_bytes())[..12]
+        &hash(state.dirty.as_bytes())[..12],
+        state.dirty_count
     )
 }
 fn detail_token<'a>(detail: &'a str, name: &str) -> Option<&'a str> {
@@ -1684,6 +1728,15 @@ fn safe_path(path: &str) -> String {
         path.into()
     }
 }
+const MAX_EVENT_PATHS_PER_EVENT: usize = 128;
+const MAX_RETAINED_EVENT_PATH_ROWS: i64 = 4096;
+const MAX_COMPACT_EVENT_PATH_ROWS: i64 = 512;
+fn prune_event_paths(c: &Connection, keep: i64) -> rusqlite::Result<usize> {
+    c.execute(
+        "DELETE FROM event_paths WHERE id <= (SELECT COALESCE(MAX(id), 0) - ?1 FROM event_paths)",
+        params![keep],
+    )
+}
 fn observe_with_rules(
     root: &Path,
     c: &Connection,
@@ -1695,6 +1748,7 @@ fn observe_with_rules(
         head: git(root, &["rev-parse", "HEAD"])?,
         branch: git(root, &["branch", "--show-current"])?,
         dirty: dirty_summary(&entries),
+        dirty_count: entries.len(),
     };
     let s = hash(format!("{}\n{}\n{}", state.head, state.branch, state.dirty).as_bytes());
     let detail = state_detail(&state);
@@ -1707,17 +1761,21 @@ fn observe_with_rules(
         .optional()?
         .unwrap_or_default();
     if last.0 != s {
-        c.execute(
+        let transaction = c.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO events(kind,snapshot,detail) VALUES(?1,?2,?3)",
             params![event_kind(&last.1, &detail), s, detail],
         )?;
-        let event_id = c.last_insert_rowid();
-        for entry in entries {
-            c.execute(
-                "INSERT INTO event_paths(event_id,path,path_hash) VALUES(?1,?2,?3)",
-                params![event_id, entry.path, entry.path_hash],
-            )?;
+        let event_id = transaction.last_insert_rowid();
+        {
+            let mut statement = transaction
+                .prepare("INSERT INTO event_paths(event_id,path,path_hash) VALUES(?1,?2,?3)")?;
+            for entry in entries.into_iter().take(MAX_EVENT_PATHS_PER_EVENT) {
+                statement.execute(params![event_id, entry.path, entry.path_hash])?;
+            }
         }
+        prune_event_paths(&transaction, MAX_RETAINED_EVENT_PATH_ROWS)?;
+        transaction.commit()?;
         return Ok(true);
     }
     Ok(false)
@@ -1986,6 +2044,19 @@ fn record_check(
     )?;
     card(root, c)
 }
+fn compact_evidence(c: &Connection) -> rusqlite::Result<(i64, i64, usize)> {
+    let transaction = c.unchecked_transaction()?;
+    let events: i64 = transaction.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+    let checks: i64 = transaction.query_row("SELECT COUNT(*) FROM checks", [], |r| r.get(0))?;
+    let summary = hash(format!("{events}:{checks}").as_bytes());
+    transaction.execute(
+        "INSERT INTO epochs(event_count,check_count,summary_hash) VALUES(?1,?2,?3)",
+        params![events, checks, summary],
+    )?;
+    let pruned = prune_event_paths(&transaction, MAX_COMPACT_EVENT_PATH_ROWS)?;
+    transaction.commit()?;
+    Ok((events, checks, pruned))
+}
 fn explain_epochs(c: &Connection) -> rusqlite::Result<String> {
     let mut statement = c.prepare(
         "SELECT id,event_count,check_count,summary_hash FROM epochs ORDER BY id DESC LIMIT 12",
@@ -2238,14 +2309,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "compact" => {
             let _lock = writer_lock(&root)?;
-            let events: i64 = c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
-            let checks: i64 = c.query_row("SELECT COUNT(*) FROM checks", [], |r| r.get(0))?;
-            let summary = hash(format!("{events}:{checks}").as_bytes());
-            c.execute(
-                "INSERT INTO epochs(event_count,check_count,summary_hash) VALUES(?1,?2,?3)",
-                params![events, checks, summary],
-            )?;
-            println!("created privacy-safe epoch for {events} events and {checks} checks");
+            let (events, checks, pruned) = compact_evidence(&c)?;
+            println!(
+                "created privacy-safe epoch for {events} events and {checks} checks; pruned {pruned} old path-detail rows"
+            );
         }
         "explain" => println!("{}", explain_epochs(&c)?),
         "note" => {
@@ -2476,6 +2543,51 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    fn database_header_probe_is_bounded_regular_and_no_follow() {
+        use std::os::unix::fs::symlink;
+
+        let root = env::temp_dir().join(format!(
+            "relay-database-header-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("evidence.sqlite");
+        assert_eq!(
+            database_header_state(&path).unwrap(),
+            DatabaseHeaderState::MissingOrEmpty
+        );
+        fs::File::create(&path).unwrap();
+        assert_eq!(
+            database_header_state(&path).unwrap(),
+            DatabaseHeaderState::MissingOrEmpty
+        );
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.write_all(b"SQLite format 3\0").unwrap();
+        file.set_len(64 * 1024 * 1024).unwrap();
+        drop(file);
+        assert_eq!(
+            database_header_state(&path).unwrap(),
+            DatabaseHeaderState::Sqlite
+        );
+        fs::write(&path, b"bad").unwrap();
+        assert_eq!(
+            database_header_state(&path).unwrap(),
+            DatabaseHeaderState::Foreign
+        );
+
+        let outside = root.join("outside");
+        fs::write(&outside, "PRECIOUS").unwrap();
+        fs::remove_file(&path).unwrap();
+        symlink(&outside, &path).unwrap();
+        assert!(database_header_state(&path).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "PRECIOUS");
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
     fn managed_descriptor_write_stays_in_the_opened_directory_after_path_swap() {
         use std::os::unix::fs::symlink;
 
@@ -2656,6 +2768,34 @@ mod tests {
         let explanation = explain_epochs(&c).unwrap();
         assert!(explanation.contains("events=3, checks=2"));
         assert!(!explanation.contains("safe aggregate"));
+    }
+    #[test]
+    fn compact_bounds_path_detail_without_deleting_core_events() {
+        let c = Connection::open_in_memory().unwrap();
+        create_schema(&c).unwrap();
+        c.execute(
+            "INSERT INTO events(kind,snapshot,detail) VALUES('dirty-set','snapshot','safe')",
+            [],
+        )
+        .unwrap();
+        for id in 0..600 {
+            c.execute(
+                "INSERT INTO event_paths(event_id,path,path_hash) VALUES(1,?1,?2)",
+                params![format!("path-{id}"), hash(format!("path-{id}").as_bytes())],
+            )
+            .unwrap();
+        }
+
+        let (events, checks, pruned) = compact_evidence(&c).unwrap();
+        assert_eq!((events, checks, pruned), (1, 0, 88));
+        let retained: i64 = c
+            .query_row("SELECT COUNT(*) FROM event_paths", [], |row| row.get(0))
+            .unwrap();
+        let core_events: i64 = c
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(retained, MAX_COMPACT_EVENT_PATH_ROWS);
+        assert_eq!(core_events, 1);
     }
     #[test]
     fn event_taxonomy_distinguishes_head_branch_and_dirty_changes() {

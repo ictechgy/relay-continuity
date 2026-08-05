@@ -116,9 +116,13 @@ raw command text in Relay's process arguments and hashing it before it reaches
 SQLite. It is opt-in because shell history itself can be sensitive; Relay does
 not modify shell profiles automatically.
 
-`relay compact` appends a privacy-safe aggregate epoch. `relay explain` shows
-only that epoch's event/check counts and summary hash; it never reconstructs
-source, diffs, outputs, or annotations.
+Core hash/status evidence remains append-only. Path names are more sensitive
+and are retained only as bounded recent detail: at most 128 per event and 4096
+rows overall. `relay compact` atomically appends a privacy-safe aggregate epoch
+and reduces path detail to the most recent 512 rows. `relay explain` shows only
+the epoch's event/check counts and summary hash; it never reconstructs source,
+diffs, outputs, paths, or annotations. Compaction reuses database pages but does
+not promise an immediate reduction in the SQLite file's allocated size.
 
 ## Provider capability matrix
 

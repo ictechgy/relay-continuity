@@ -973,6 +973,67 @@ fn nul_porcelain_preserves_space_paths_without_storing_source_content() {
 }
 
 #[test]
+fn observe_caps_sensitive_path_detail_and_records_the_total_count() {
+    let root = git_fixture("path-retention-test");
+    assert!(run(&root, &["init"]).status.success());
+    for id in 0..140 {
+        fs::write(root.join(format!("bulk-{id:03}.txt")), "private body").expect("write bulk path");
+    }
+    assert!(run(&root, &["observe"]).status.success());
+
+    let database = Connection::open(state_database(&root)).expect("open evidence");
+    let (event_id, detail): (i64, String) = database
+        .query_row(
+            "SELECT id,detail FROM events ORDER BY id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read latest event");
+    let path_rows: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM event_paths WHERE event_id=?1",
+            [event_id],
+            |row| row.get(0),
+        )
+        .expect("count bounded path rows");
+    assert_eq!(path_rows, 128);
+    assert!(detail.contains("paths#140"), "{detail}");
+    drop(database);
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn observe_rolls_back_the_event_when_path_persistence_fails() {
+    let root = git_fixture("observe-transaction-test");
+    assert!(run(&root, &["init"]).status.success());
+    let database_path = state_database(&root);
+    let database = Connection::open(&database_path).expect("open evidence");
+    let before: i64 = database
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("count baseline events");
+    database
+        .execute_batch(
+            "CREATE TRIGGER reject_event_path BEFORE INSERT ON event_paths BEGIN SELECT RAISE(FAIL, 'fixture rejection'); END;",
+        )
+        .expect("install rejection trigger");
+    drop(database);
+
+    fs::write(root.join("transaction.txt"), "private body").expect("write dirty path");
+    assert!(!run(&root, &["observe"]).status.success());
+    let database = Connection::open(&database_path).expect("reopen evidence");
+    let after: i64 = database
+        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+        .expect("count rolled-back events");
+    assert_eq!(after, before, "event insert must roll back with its paths");
+    database
+        .execute_batch("DROP TRIGGER reject_event_path;")
+        .expect("remove rejection trigger");
+    drop(database);
+    assert!(run(&root, &["observe"]).status.success());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
 fn daemon_restart_reconciles_work_queued_before_an_abrupt_exit() {
     let root = git_fixture("restart-queued-test");
     assert!(run(&root, &["init"]).status.success());

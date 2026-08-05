@@ -15,6 +15,12 @@ swapped `.relay` path. The optional `RELAY_STATE_HOME` override must be an
 absolute path under the invoking user's control; do not point it at an
 untrusted or shared directory.
 
+Core event, check, assertion, annotation, adapter, and epoch evidence is
+append-only. Repository path names are treated as sensitive bounded metadata,
+not permanent evidence: Relay stores at most 128 path rows per event and 4096
+overall, and `relay compact` retains only the most recent 512. Automatic AI
+context omits those names entirely.
+
 ## Reporting a vulnerability
 
 Please use [GitHub private vulnerability reporting](https://github.com/ictechgy/relay-continuity/security/advisories/new)
