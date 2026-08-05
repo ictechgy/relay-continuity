@@ -1,16 +1,72 @@
 {
   "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
   "omxAvailable": false,
-  "status": "in_progress",
-  "currentGoal": "G111",
+  "status": "complete",
+  "currentGoal": null,
+  "completedGoal": "G111",
   "sourceReview": ".omx/artifacts/claude-relay-whole-review-summary-20260806.md",
   "sourceSnapshot": "632eb98678952d4deb2c1bf200c0df8ac67b2597",
+  "implementationSnapshot": "f40f6c0873635b2fa4ca52219dd95fe2fda9ac1d",
+  "binaryDiffSha256": "7dd15e76baec1bcc3e7ec88ded9405a6542050e41a4232c09e9597eb0d9df388",
   "requiredFinalGates": {
-    "aiSlopCleaner": "pending",
-    "verification": "pending",
-    "codeReviewRecommendation": "APPROVE required",
-    "architectStatus": "CLEAR required",
-    "architectureInvariantGate": "passed required"
+    "aiSlopCleaner": "passed",
+    "verification": "passed",
+    "codeReviewRecommendation": "APPROVE",
+    "architectStatus": "CLEAR",
+    "architectureInvariantGate": "passed"
+  },
+  "finalQualityGate": {
+    "goalId": "G111",
+    "aiSlopCleaner": {
+      "status": "passed",
+      "evidence": ".omx/artifacts/ai-slop-cleanup-g107-g110-20260806.md"
+    },
+    "verification": {
+      "status": "passed",
+      "commands": [
+        "cargo fmt --check",
+        "cargo check --all-targets --locked",
+        "cargo test --locked (46 passed)",
+        "cargo clippy --all-targets --all-features --locked -- -D warnings",
+        "cargo build --release --locked",
+        "cargo audit --deny warnings (50 locked dependencies, 1189 advisories, no warnings)",
+        "JavaScript syntax checks for distribution scripts",
+        "node scripts/verify-npm-packages.mjs --templates",
+        "node scripts/test-package-npm.mjs",
+        "node scripts/test-relay-wrapper.mjs",
+        "node scripts/test-release-workflow.mjs",
+        "node scripts/verify-public-artifacts.mjs",
+        "node scripts/test-public-artifacts.mjs",
+        "Homebrew formula render and Ruby syntax",
+        "CI and release YAML parse",
+        "JSON and JSONL parse",
+        "git diff --check"
+      ]
+    },
+    "independentReview": {
+      "status": "passed",
+      "evidence": ".omx/artifacts/code-review-g107-g111-final-20260806.md",
+      "snapshot": "f40f6c0873635b2fa4ca52219dd95fe2fda9ac1d",
+      "binaryDiffSha256": "7dd15e76baec1bcc3e7ec88ded9405a6542050e41a4232c09e9597eb0d9df388",
+      "codeReviewer": {
+        "verdict": "APPROVE",
+        "actionableFindings": 0
+      },
+      "architect": {
+        "verdict": "CLEAR",
+        "blockingConcerns": 0
+      }
+    },
+    "architectureInvariantGate": {
+      "status": "passed",
+      "evidence": ".omx/artifacts/architecture-invariant-audit-g107-g111-20260806.md"
+    },
+    "externalReleaseEvidence": {
+      "status": "not_yet_produced",
+      "blockingRepositoryIntegration": false,
+      "blockingFutureReleaseClaim": true,
+      "required": "A future tagged GitHub-hosted workflow must create and verify real attestations before staging or publication is claimed."
+    }
   },
   "priorCompletedRun": {
     "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
