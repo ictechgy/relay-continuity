@@ -22,7 +22,10 @@ function verify(fixture, expectedStatus, expectedLabel, sensitiveValue) {
     encoding: "utf8"
   });
   if (result.status !== expectedStatus) {
-    throw new Error(`verifier exited ${result.status}; expected ${expectedStatus}: ${result.stderr || result.stdout}`);
+    const context = expectedLabel ? ` for ${expectedLabel}` : "";
+    throw new Error(
+      `verifier exited ${result.status}; expected ${expectedStatus}${context}: ${result.stderr || result.stdout}`
+    );
   }
   const output = `${result.stdout}${result.stderr}`;
   if (expectedLabel && !output.includes(expectedLabel)) {
@@ -75,6 +78,23 @@ try {
     await writeFile(tracked, `executable: ${secret}\n`);
     verify(fixture, 1, label, secret);
   }
+
+  const repositoryRelativePaths = [
+    "docs/root/index.md",
+    "fixtures/tmp/case.md",
+    "packages/home/alice/readme.md",
+    "fixtures/private/tmp/case.md",
+    "tools/opt/homebrew/bin/claude",
+    "fixtures/usr/local/Cellar/node/readme.md",
+    "fixtures/nix/store/example-hash/bin/agy",
+    String.raw`fixtures\\C:\\Users\\Alice\\bin\\grok.exe`,
+    "fixtures//build-host/Users/Alice/bin/grok.exe"
+  ];
+  await writeFile(
+    tracked,
+    repositoryRelativePaths.map((path) => `repository-relative: ${path}`).join("\n") + "\n"
+  );
+  verify(fixture, 0);
 
   const tokenCases = [
     [`ghp_${"Ab3".repeat(12)}`, "GitHub access token"],

@@ -13,35 +13,35 @@ const MAX_ISSUES = 50;
 const prohibitedPaths = [
   {
     label: "macOS or Linux user-home absolute path",
-    pattern: /\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/|(?=$|[\s"'`),.;:\]}]))/
+    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:Users|home)\/[A-Za-z0-9._-]+(?:\/|(?=$|[\s"'`),.;:\]}]))/
   },
   {
     label: "privileged Unix user-home absolute path",
-    pattern: /\/(?:var\/)?root(?:\/|(?=$|[\s"'`),.;:\]}]))/
+    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:var\/)?root(?:\/|(?=$|[\s"'`),.;:\]}]))/
   },
   {
     label: "temporary workspace absolute path",
-    pattern: /\/(?:tmp|private\/tmp|var\/tmp|var\/folders)(?:\/|(?=$|[\s"'`),.;:\]}]))/
+    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:tmp|private\/tmp|var\/tmp|var\/folders)(?:\/|(?=$|[\s"'`),.;:\]}]))/
   },
   {
     label: "Windows user-home absolute path",
-    pattern: /[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
+    pattern: /(?<![A-Za-z0-9._~+@%\\\/-])[A-Za-z]:[\\/]+Users[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
   },
   {
     label: "UNC user-home absolute path",
-    pattern: /(?:\\\\|\/\/)[^\\/\s"'`<>]+[\\/]+(?:(?:[A-Za-z]\$|[^\\/\s"'`<>]+)[\\/]+)?(?:Users|home)[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
+    pattern: /(?<![A-Za-z0-9._~+@%\\\/-])(?:\\{2,}|\/{2})[^\\/\s"'`<>]+[\\/]+(?:(?:[A-Za-z]\$|[^\\/\s"'`<>]+)[\\/]+)?(?:Users|home)[\\/]+[^\\/\r\n\t"'`<>]+(?:[\\/]+|(?=$|[\s"'`),.;:\]}]))/i
   },
   {
     label: "workstation-local tool path",
-    pattern: /\/(?:opt\/homebrew|usr\/local)\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
+    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:opt\/homebrew|usr\/local)\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
   },
   {
     label: "Homebrew Cellar or opt absolute path",
-    pattern: /\/(?:opt\/homebrew|usr\/local)\/(?:Cellar|opt)\/[^\s"'`<>]+/i
+    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/(?:opt\/homebrew|usr\/local)\/(?:Cellar|opt)\/[^\s"'`<>]+/i
   },
   {
     label: "Nix workstation-local tool path",
-    pattern: /\/nix\/store\/[A-Za-z0-9._+-]+\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
+    pattern: /(?<![A-Za-z0-9._~+@%\/-])\/nix\/store\/[A-Za-z0-9._+-]+\/(?:s?bin)\/[A-Za-z0-9._+@%-]+/
   }
 ];
 
