@@ -59,8 +59,8 @@ For a tagged release, download the `npm-stage-manifest` workflow artifact. It
 records the verified package, tarball, version, tarball SHA-256, native-binary
 SHA-256 where applicable, and immutable `next` dist-tag in staging order.
 Before staging, CI recomputes each digest from the downloaded tarball and
-compares it to the package artifact manifest. CI
-deliberately does not guess or parse a stage ID from npm command output. In npm's
+compares it to the package artifact manifest. CI deliberately does not guess or
+parse a stage ID from npm command output. In npm's
 Staged Packages UI (or with an authenticated maintainer CLI session), find each
 package/version from that manifest, record its stage ID, and download the staged
 tarball for inspection. Recompute its SHA-256 and compare it to the matching

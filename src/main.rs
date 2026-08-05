@@ -2026,7 +2026,6 @@ fn event_is_relevant(root: &Path, event: &Event, ignore_rules: &IgnoreRules) -> 
 fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn std::error::Error>> {
     let mut ignore_rules = IgnoreRules::default();
     let (tx, rx) = channel();
-    let poll_sender = tx.clone();
     let watcher = match RecommendedWatcher::new(tx, Config::default()) {
         Ok(mut watcher) => match watcher.watch(root, RecursiveMode::NonRecursive) {
             Ok(()) => Some(watcher),
@@ -2035,8 +2034,7 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
         Err(_) => None,
     };
     let mut polling_only = watcher.is_none();
-    let _watcher = watcher;
-    let _poll_sender = poll_sender;
+    let _watcher_guard = watcher;
     atomic_replace_managed(root, &[".relay"], "daemon.ready", nonce.as_bytes())?;
     daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
     let mut last_reconcile = Instant::now();

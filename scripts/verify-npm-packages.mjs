@@ -41,7 +41,6 @@ const packageContracts = [
     files: ["bin/relay.js"]
   }
 ];
-const packageDirectories = packageContracts.map(({ directory }) => directory);
 const platformPackageNames = packageContracts
   .filter(({ asset }) => asset)
   .map(({ directory }) => `@ictechgy/${directory}`);
@@ -154,7 +153,9 @@ function assertManifestContract(manifest, contract, source) {
     throw new Error(`${source}: package name does not match ${contract.directory}`);
   }
   for (const key of forbiddenManifestKeys) {
-    if (Object.hasOwn(manifest, key)) throw new Error(`${source}: forbidden package metadata: ${key}`);
+    if (Object.hasOwn(manifest, key)) {
+      throw new Error(`${source}: forbidden package metadata: ${key}`);
+    }
   }
   if (!isDeepStrictEqual(manifest.files, contract.files)) {
     throw new Error(`${source}: files does not match the package contract`);
@@ -167,7 +168,10 @@ function assertManifestContract(manifest, contract, source) {
     ) {
       throw new Error(`${source}: os or cpu does not match the platform contract`);
     }
-    if (Object.hasOwn(manifest, "bin") || Object.hasOwn(manifest, "optionalDependencies")) {
+    if (
+      Object.hasOwn(manifest, "bin") ||
+      Object.hasOwn(manifest, "optionalDependencies")
+    ) {
       throw new Error(`${source}: platform package exposes unexpected wrapper metadata`);
     }
     return;
@@ -212,17 +216,25 @@ async function verifyOutput(output, artifacts) {
   const tarballs = join(output, "tarballs");
   const orderPath = join(output, "publish-order.txt");
   const publishManifestPath = join(output, "publish-manifest.json");
-  if (!existsSync(packages) || !existsSync(tarballs) || !existsSync(orderPath) || !existsSync(publishManifestPath)) {
+  if (
+    !existsSync(packages) ||
+    !existsSync(tarballs) ||
+    !existsSync(orderPath) ||
+    !existsSync(publishManifestPath)
+  ) {
     throw new Error(`${output}: missing packages, tarballs, publish-order.txt, or publish-manifest.json`);
   }
 
   const order = (await readFile(orderPath, "utf8")).trim().split("\n").filter(Boolean);
   const publishManifest = JSON.parse(await readFile(publishManifestPath, "utf8"));
   exactKeys(publishManifest, ["version", "packages"], publishManifestPath);
-  if (order.length !== packageDirectories.length || new Set(order).size !== order.length) {
-    throw new Error(`${orderPath}: expected ${packageDirectories.length} package tarballs`);
+  if (order.length !== packageContracts.length || new Set(order).size !== order.length) {
+    throw new Error(`${orderPath}: expected ${packageContracts.length} package tarballs`);
   }
-  if (!Array.isArray(publishManifest.packages) || publishManifest.packages.length !== order.length) {
+  if (
+    !Array.isArray(publishManifest.packages) ||
+    publishManifest.packages.length !== order.length
+  ) {
     throw new Error(`${publishManifestPath}: expected ${order.length} package entries`);
   }
 

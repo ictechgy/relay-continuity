@@ -81,8 +81,7 @@ async function stagedInputs(arguments_) {
       entry.name !== expectedPackages[index] ||
       entry.version !== manifest.version ||
       !/^[a-f0-9]{64}$/.test(entry.sha256) ||
-      (platformPackage && !/^[a-f0-9]{64}$/.test(entry.binarySha256)) ||
-      (!platformPackage && Object.hasOwn(entry, "binarySha256"))
+      (platformPackage && !/^[a-f0-9]{64}$/.test(entry.binarySha256))
     ) {
       throw new Error(`publish order does not match expected package at position ${index + 1}`);
     }
@@ -102,16 +101,21 @@ async function stagedInputs(arguments_) {
       path
     };
   }));
-  if (byTarball.size !== inputs.length || manifest.packages.some((entry) => !order.includes(entry.tarball))) {
+  if (
+    byTarball.size !== inputs.length ||
+    manifest.packages.some((entry) => !order.includes(entry.tarball))
+  ) {
     throw new Error("publish manifest and publish order must contain the same tarballs");
   }
   return { version: manifest.version, inputs };
 }
 
 function stage(path) {
-  const result = spawnSync("npm", ["stage", "publish", path, "--access", "public", "--tag", "next"], {
-    encoding: "utf8"
-  });
+  const result = spawnSync(
+    "npm",
+    ["stage", "publish", path, "--access", "public", "--tag", "next"],
+    { encoding: "utf8" }
+  );
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   if (result.status !== 0) throw new Error(`npm stage publish failed for ${path}`);
