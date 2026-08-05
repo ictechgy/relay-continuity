@@ -9,6 +9,13 @@
     {"id":"G103","title":"Implement and verify the Codex trusted hook adapter","status":"complete"},
     {"id":"G104","title":"Probe and implement Claude and Grok adapters only where safe","status":"complete"},
     {"id":"G105","title":"Verify privacy, lifecycle, compatibility, and release readiness","status":"complete"},
-    {"id":"G106","title":"Harden release evidence, npm OIDC staging, and privacy-safe feedback intake","status":"complete","plan":".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md","testSpec":".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md"}
+    {"id":"G106","title":"Harden release evidence, npm OIDC staging, and privacy-safe feedback intake","status":"complete","plan":".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md","testSpec":".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md"},
+    {"id":"G107","title":"Make daemon capture resilient and bound watcher/process path hazards","status":"superseded","findings":["R-02","R-04","R-05","R-11"],"steering":{"kind":"split_subgoal","splitInto":["G107A","G107B"]}},
+    {"id":"G107A","title":"Fix process-liveness and service-path guardrails","status":"complete","findings":["R-02","R-11"]},
+    {"id":"G108","title":"Replace racy PID-file writer ownership with crash-safe mutual exclusion","status":"in_progress","findings":["R-03"]},
+    {"id":"G109","title":"Bound evidence database work, retention, and path persistence transactions","status":"pending","findings":["R-01","R-06","R-07"]},
+    {"id":"G107B","title":"Make daemon capture resilient and watcher load bounded","status":"pending","findings":["R-04","R-05"]},
+    {"id":"G110","title":"Strengthen npm and release provenance plus distribution edge cases","status":"pending","findings":["R-08","R-09","R-10","R-12"]},
+    {"id":"G111","title":"Prove final performance, privacy, compatibility, and review gates","status":"pending","findings":[]}
   ]
 }

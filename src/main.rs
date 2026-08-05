@@ -904,33 +904,34 @@ fn xml_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 fn systemd_exec_argument(value: &str) -> Result<String, Box<dyn std::error::Error>> {
-    if value.chars().any(|character| {
-        character.is_ascii_control() || matches!(character, '\\' | '"' | '\'' | '*' | '?' | '[')
-    }) {
+    if value.chars().any(|character| character.is_ascii_control()) {
         return Err("Relay rejected a systemd-unsafe executable path".into());
     }
     let mut encoded = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
+            '\\' => encoded.push_str(r"\\"),
+            '"' => encoded.push_str(r#"\""#),
             '%' => encoded.push_str("%%"),
             character => encoded.push(character),
         }
     }
     Ok(format!(r#""{encoded}""#))
 }
-fn systemd_working_directory(value: &str) -> String {
-    value
+fn systemd_working_directory(value: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if value.chars().any(|character| character.is_ascii_control()) {
+        return Err("Relay rejected a control character in the service working directory".into());
+    }
+    Ok(value
         .chars()
         .map(|character| match character {
             ' ' => r"\x20".into(),
-            '\t' => r"\x09".into(),
-            '\n' => r"\x0a".into(),
             '\\' => r"\\".into(),
             '"' => r"\x22".into(),
             '%' => "%%".into(),
             character => character.to_string(),
         })
-        .collect()
+        .collect())
 }
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -950,6 +951,12 @@ fn service_template_with_executable(
         return Err("Relay rejected a control character in the service executable path".into());
     }
     let working_directory = root.to_string_lossy();
+    if working_directory
+        .chars()
+        .any(|character| character.is_ascii_control())
+    {
+        return Err("Relay rejected a control character in the service working directory".into());
+    }
     let label = service_id(root);
     Ok(match kind {
         "launchd" => format!(
@@ -960,7 +967,7 @@ fn service_template_with_executable(
         ),
         "systemd" => format!(
             "[Unit]\nDescription=Relay local evidence daemon ({label})\n\n[Service]\nType=simple\nWorkingDirectory={}\nExecStart=:{} integration service run\nRestart=on-failure\nRestartSec=2\n\n[Install]\nWantedBy=default.target\n",
-            systemd_working_directory(&working_directory),
+            systemd_working_directory(&working_directory)?,
             systemd_exec_argument(executable)?
         ),
         _ => unreachable!(),
@@ -1733,6 +1740,17 @@ fn read_nonce(root: &Path) -> Option<String> {
         .nth(1)
         .map(str::to_owned)
 }
+#[cfg(unix)]
+fn process_active(pid: u32) -> bool {
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+#[cfg(not(unix))]
 fn process_active(pid: u32) -> bool {
     Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -2560,22 +2578,15 @@ mod tests {
     #[test]
     fn systemd_execstart_preserves_literal_paths_and_rejects_controls() {
         let root = Path::new("/tmp/ordinary worktree");
-        let executable = "/tmp/relay %h/$HOME/${HOME}/한글";
+        let executable = "/tmp/relay 'quoted' *?[ %h/$HOME/${HOME}/한글";
         let systemd = service_template_with_executable(root, "systemd", executable).unwrap();
-        assert!(
-            systemd.contains(
-                r#"ExecStart=:"/tmp/relay %%h/$HOME/${HOME}/한글" integration service run"#
-            )
-        );
+        assert!(systemd.contains(
+            r#"ExecStart=:"/tmp/relay 'quoted' *?[ %%h/$HOME/${HOME}/한글" integration service run"#
+        ));
         assert!(systemd_exec_argument("/tmp/relay-\u{85}").is_ok());
-
-        for unsupported in ['\\', '"', '\'', '*', '?', '['] {
-            let unsupported_path = format!("/tmp/relay{unsupported}name");
-            assert!(
-                service_template_with_executable(root, "systemd", &unsupported_path).is_err(),
-                "systemd-unsafe character {unsupported:?} must be rejected"
-            );
-        }
+        let escaped = systemd_exec_argument("/tmp/relay\\name\"quoted").unwrap();
+        assert!(escaped.contains(r"\\"));
+        assert!(escaped.contains(r#"\""#));
         assert!(service_template_with_executable(root, "launchd", "/tmp/relay'\"\\name").is_ok());
 
         for control in ['\0', '\t', '\n', '\r', '\u{1b}', '\u{7f}'] {
@@ -2591,6 +2602,31 @@ mod tests {
                 control as u32
             );
         }
+
+        for control in ['\t', '\n', '\r', '\u{1b}', '\u{7f}'] {
+            let malicious_root = format!("/tmp/worktree{control}Injected=true");
+            assert!(
+                service_template_with_executable(
+                    Path::new(&malicious_root),
+                    "systemd",
+                    "/tmp/relay"
+                )
+                .is_err()
+            );
+            assert!(
+                service_template_with_executable(
+                    Path::new(&malicious_root),
+                    "launchd",
+                    "/tmp/relay"
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn process_liveness_uses_the_kernel_without_path_lookup() {
+        assert!(process_active(std::process::id()));
+        assert!(!process_active(0));
     }
     #[test]
     fn hook_command_shell_quoting_rejects_expansion_syntax() {

@@ -1,153 +1,180 @@
 {
   "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
   "omxAvailable": false,
-  "status": "complete",
-  "completedGoal": "G106",
-  "plan": ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
-  "testSpec": ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md",
-  "implementationReview": {
-    "snapshot": "75b55126d710ae8062be9578807040683fa41532",
-    "verdicts": {
-      "code": "APPROVE",
-      "architecture": "CLEAR"
-    }
+  "status": "in_progress",
+  "currentGoal": "G108",
+  "sourceReview": ".omx/artifacts/claude-relay-whole-review-summary-20260806.md",
+  "sourceSnapshot": "632eb98678952d4deb2c1bf200c0df8ac67b2597",
+  "requiredFinalGates": {
+    "aiSlopCleaner": "pending",
+    "verification": "pending",
+    "codeReviewRecommendation": "APPROVE required",
+    "architectStatus": "CLEAR required",
+    "architectureInvariantGate": "passed required"
   },
-  "latestMaintenanceEvidence": {
-    "snapshot": "b469f729f21538fa7ab8470e5278bb9199abd6df",
-    "recordedAt": "2026-08-02",
-    "scope": [
-      "pinned CI actions and least-privilege workflow permissions",
-      "macOS and Linux quality gates",
-      "Linux RustSec advisory audit",
-      "source-install Quick Start"
-    ],
-    "localVerification": {
-      "format": "cargo fmt --check",
-      "check": "cargo check --all-targets --locked",
-      "tests": "33 passed",
-      "clippy": "cargo clippy --all-targets --all-features --locked -- -D warnings",
-      "releaseBuild": "cargo build --release --locked",
-      "audit": "cargo audit --deny warnings",
-      "diff": "git diff --check"
-    },
-    "preChangeMainCi": {
-      "snapshot": "7add4925b73a46594d0563166aaf9325091a983f",
-      "run": "https://github.com/ictechgy/relay-continuity/actions/runs/30743183422",
-      "jobs": {
-        "macos": "success",
-        "ubuntu": "success"
+  "priorCompletedRun": {
+    "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
+    "omxAvailable": false,
+    "status": "complete",
+    "completedGoal": "G106",
+    "plan": ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
+    "testSpec": ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md",
+    "implementationReview": {
+      "snapshot": "75b55126d710ae8062be9578807040683fa41532",
+      "verdicts": {
+        "code": "APPROVE",
+        "architecture": "CLEAR"
       }
     },
-    "limits": [
-      "The changed CI workflow must pass on its own pull request before merge.",
-      "Local verification does not prove service-manager or provider-hook behavior on another user's machine."
-    ]
-  },
-  "releaseBoundary": {
-    "repository": "https://github.com/ictechgy/relay-continuity",
-    "version": "0.2.0-rc.6",
-    "tag": {
-      "name": "v0.2.0-rc.6",
-      "commit": "06ce504ec032c1f0450ed18d061e060726053ed3"
-    },
-    "release": {
-      "url": "https://github.com/ictechgy/relay-continuity/releases/tag/v0.2.0-rc.6",
-      "publishedAt": "2026-08-02T12:18:39Z",
-      "prerelease": true,
-      "assets": {
-        "relay-macos-arm64": "9c5c2a40d04b048dc0ba6b7196be5d2a2d89cdd2732e15b3a5481b311e618715",
-        "relay-macos-x86_64": "60bef1a7a4c09bf959b1c1337f784b96d411bfd257711d5c5c50ac29824787fc",
-        "relay-linux-x86_64": "493c5c3d9d0e1095c6219bb9d046fd91542fcbc00098d0e5944a2d62187b379b"
-      }
-    },
-    "taggedWorkflow": {
-      "url": "https://github.com/ictechgy/relay-continuity/actions/runs/30747458973",
-      "conclusion": "success",
-      "jobs": {
-        "archive-macos-arm64": "success",
-        "archive-macos-x86_64": "success",
-        "archive-linux-x86_64": "success",
-        "npm-packages": "success",
-        "npm-publish": "skipped"
+    "latestMaintenanceEvidence": {
+      "snapshot": "b469f729f21538fa7ab8470e5278bb9199abd6df",
+      "recordedAt": "2026-08-02",
+      "scope": [
+        "pinned CI actions and least-privilege workflow permissions",
+        "macOS and Linux quality gates",
+        "Linux RustSec advisory audit",
+        "source-install Quick Start"
+      ],
+      "localVerification": {
+        "format": "cargo fmt --check",
+        "check": "cargo check --all-targets --locked",
+        "tests": "33 passed",
+        "clippy": "cargo clippy --all-targets --all-features --locked -- -D warnings",
+        "releaseBuild": "cargo build --release --locked",
+        "audit": "cargo audit --deny warnings",
+        "diff": "git diff --check"
       },
-      "npmPublicationInference": "none; the job was skipped because PUBLISH_NPM was disabled"
-    },
-    "manualNpmPublication": {
-      "status": "published",
-      "distTagRequested": "next",
-      "evidence": "Manual maintainer publication after the tagged workflow; separate from GitHub Actions evidence."
-    },
-    "registryObservation": {
-      "observedAt": "2026-08-02",
-      "source": "npm view",
-      "packages": {
-        "@ictechgy/relay": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" },
-        "@ictechgy/relay-darwin-arm64": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" },
-        "@ictechgy/relay-darwin-x64": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" },
-        "@ictechgy/relay-linux-x64": { "next": "0.2.0-rc.6", "latest": "0.2.0-rc.6" }
+      "preChangeMainCi": {
+        "snapshot": "7add4925b73a46594d0563166aaf9325091a983f",
+        "run": "https://github.com/ictechgy/relay-continuity/actions/runs/30743183422",
+        "jobs": {
+          "macos": "success",
+          "ubuntu": "success"
+        }
       },
-      "limits": "This is a dated external registry observation, not a claim about a future tag or workflow outcome."
-    },
-    "requiredBeforeFuturePublishing": "Review the tagged workflow artifacts, npm-stage-manifest, owner-resolved stage IDs, SHA-256 checksums, and staged tarballs before owner 2FA approval."
-  },
-  "remainingProductLimits": [
-    "Claude and Grok automatic context injection remain unavailable until their installed, authenticated hook contracts prove safe.",
-    "Windows managed-state operations remain intentionally unsupported."
-  ],
-  "finalQualityGate": {
-    "goalId": "G106",
-    "aiSlopCleaner": {
-      "status": "passed",
-      "evidence": "Bounded changed-file inventory found no masking fallback, TODO/FIXME, dead code, or cleanup edit after the final provenance repair."
-    },
-    "verification": {
-      "status": "passed",
-      "commands": [
-        "cargo fmt --check",
-        "cargo check --all-targets --locked",
-        "cargo test --locked (33 passed)",
-        "cargo clippy --all-targets --all-features --locked -- -D warnings",
-        "cargo build --release --locked",
-        "cargo audit --deny warnings",
-        "node scripts/verify-npm-packages.mjs --templates",
-        "node scripts/test-package-npm.mjs",
-        "Ruby YAML parse",
-        "jq JSON parse",
-        "git diff --check 0349cc8..314cfb9"
+      "limits": [
+        "The changed CI workflow must pass on its own pull request before merge.",
+        "Local verification does not prove service-manager or provider-hook behavior on another user's machine."
       ]
     },
-    "codeReview": {
-      "recommendation": "APPROVE",
-      "architectStatus": "CLEAR",
-      "evidence": ".omx/artifacts/code-review-release-evidence-oidc-feedback-20260803T025124Z.md",
-      "independentReview": {
-        "codeReviewer": {
-          "agentRole": "code-reviewer",
-          "verdict": "APPROVE",
-          "snapshot": "314cfb94384056c057b61aae072f0ae1799748b3"
-        },
-        "architect": {
-          "agentRole": "architect",
-          "verdict": "CLEAR",
-          "snapshot": "314cfb94384056c057b61aae072f0ae1799748b3"
+    "releaseBoundary": {
+      "repository": "https://github.com/ictechgy/relay-continuity",
+      "version": "0.2.0-rc.6",
+      "tag": {
+        "name": "v0.2.0-rc.6",
+        "commit": "06ce504ec032c1f0450ed18d061e060726053ed3"
+      },
+      "release": {
+        "url": "https://github.com/ictechgy/relay-continuity/releases/tag/v0.2.0-rc.6",
+        "publishedAt": "2026-08-02T12:18:39Z",
+        "prerelease": true,
+        "assets": {
+          "relay-macos-arm64": "9c5c2a40d04b048dc0ba6b7196be5d2a2d89cdd2732e15b3a5481b311e618715",
+          "relay-macos-x86_64": "60bef1a7a4c09bf959b1c1337f784b96d411bfd257711d5c5c50ac29824787fc",
+          "relay-linux-x86_64": "493c5c3d9d0e1095c6219bb9d046fd91542fcbc00098d0e5944a2d62187b379b"
         }
-      }
+      },
+      "taggedWorkflow": {
+        "url": "https://github.com/ictechgy/relay-continuity/actions/runs/30747458973",
+        "conclusion": "success",
+        "jobs": {
+          "archive-macos-arm64": "success",
+          "archive-macos-x86_64": "success",
+          "archive-linux-x86_64": "success",
+          "npm-packages": "success",
+          "npm-publish": "skipped"
+        },
+        "npmPublicationInference": "none; the job was skipped because PUBLISH_NPM was disabled"
+      },
+      "manualNpmPublication": {
+        "status": "published",
+        "distTagRequested": "next",
+        "evidence": "Manual maintainer publication after the tagged workflow; separate from GitHub Actions evidence."
+      },
+      "registryObservation": {
+        "observedAt": "2026-08-02",
+        "source": "npm view",
+        "packages": {
+          "@ictechgy/relay": {
+            "next": "0.2.0-rc.6",
+            "latest": "0.2.0-rc.6"
+          },
+          "@ictechgy/relay-darwin-arm64": {
+            "next": "0.2.0-rc.6",
+            "latest": "0.2.0-rc.6"
+          },
+          "@ictechgy/relay-darwin-x64": {
+            "next": "0.2.0-rc.6",
+            "latest": "0.2.0-rc.6"
+          },
+          "@ictechgy/relay-linux-x64": {
+            "next": "0.2.0-rc.6",
+            "latest": "0.2.0-rc.6"
+          }
+        },
+        "limits": "This is a dated external registry observation, not a claim about a future tag or workflow outcome."
+      },
+      "requiredBeforeFuturePublishing": "Review the tagged workflow artifacts, npm-stage-manifest, owner-resolved stage IDs, SHA-256 checksums, and staged tarballs before owner 2FA approval."
     },
-    "architectureInvariantGate": {
-      "status": "passed",
-      "sourceArtifacts": [
-        ".omx/ultragoal/brief.md",
-        ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
-        ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md"
-      ],
-      "invariants": [
-        "Release evidence separates tagged workflow, manual npm publication, and dated registry observations.",
-        "The npm workflow has no long-lived write-token environment variable and is gated by tag plus PUBLISH_NPM.",
-        "publish-order.txt is the sole staging-order authority; unproven stage IDs are not inferred by CI.",
-        "Public feedback forms do not ask for source, diffs, raw output, paths, chats, tokens, credentials, or customer data.",
-        "Npm publisher setup, approval, dist-tag changes, and GitHub Discussions remain explicit owner-controlled actions."
-      ],
-      "evidence": "Final independent architect CLEAR at 314cfb9 and exact-head verification in the code-review artifact."
+    "remainingProductLimits": [
+      "Claude and Grok automatic context injection remain unavailable until their installed, authenticated hook contracts prove safe.",
+      "Windows managed-state operations remain intentionally unsupported."
+    ],
+    "finalQualityGate": {
+      "goalId": "G106",
+      "aiSlopCleaner": {
+        "status": "passed",
+        "evidence": "Bounded changed-file inventory found no masking fallback, TODO/FIXME, dead code, or cleanup edit after the final provenance repair."
+      },
+      "verification": {
+        "status": "passed",
+        "commands": [
+          "cargo fmt --check",
+          "cargo check --all-targets --locked",
+          "cargo test --locked (33 passed)",
+          "cargo clippy --all-targets --all-features --locked -- -D warnings",
+          "cargo build --release --locked",
+          "cargo audit --deny warnings",
+          "node scripts/verify-npm-packages.mjs --templates",
+          "node scripts/test-package-npm.mjs",
+          "Ruby YAML parse",
+          "jq JSON parse",
+          "git diff --check 0349cc8..314cfb9"
+        ]
+      },
+      "codeReview": {
+        "recommendation": "APPROVE",
+        "architectStatus": "CLEAR",
+        "evidence": ".omx/artifacts/code-review-release-evidence-oidc-feedback-20260803T025124Z.md",
+        "independentReview": {
+          "codeReviewer": {
+            "agentRole": "code-reviewer",
+            "verdict": "APPROVE",
+            "snapshot": "314cfb94384056c057b61aae072f0ae1799748b3"
+          },
+          "architect": {
+            "agentRole": "architect",
+            "verdict": "CLEAR",
+            "snapshot": "314cfb94384056c057b61aae072f0ae1799748b3"
+          }
+        }
+      },
+      "architectureInvariantGate": {
+        "status": "passed",
+        "sourceArtifacts": [
+          ".omx/ultragoal/brief.md",
+          ".omx/plans/release-evidence-oidc-feedback-20260802T135052Z.md",
+          ".omx/specs/release-evidence-oidc-feedback-test-spec-20260802T135052Z.md"
+        ],
+        "invariants": [
+          "Release evidence separates tagged workflow, manual npm publication, and dated registry observations.",
+          "The npm workflow has no long-lived write-token environment variable and is gated by tag plus PUBLISH_NPM.",
+          "publish-order.txt is the sole staging-order authority; unproven stage IDs are not inferred by CI.",
+          "Public feedback forms do not ask for source, diffs, raw output, paths, chats, tokens, credentials, or customer data.",
+          "Npm publisher setup, approval, dist-tag changes, and GitHub Discussions remain explicit owner-controlled actions."
+        ],
+        "evidence": "Final independent architect CLEAR at 314cfb9 and exact-head verification in the code-review artifact."
+      }
     }
   }
 }

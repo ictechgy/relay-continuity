@@ -25,3 +25,24 @@ or credential data in public feedback forms. npm trusted-publisher setup,
 token revocation/disallowance, stage approval with 2FA, registry dist-tag
 changes, GitHub Discussions enablement, tag creation, and package publication
 remain owner-controlled external actions.
+
+## G107-G111: Close the post-rc.8 whole-tool review findings
+
+Implement and verify the actionable findings preserved in
+`.omx/artifacts/claude-relay-whole-review-summary-20260806.md` against
+snapshot `632eb98678952d4deb2c1bf200c0df8ac67b2597`. The work covers daemon
+resilience and watcher load, writer-lock correctness, bounded evidence-store
+I/O and retention, transactional path persistence, npm package verification,
+release provenance, public-artifact scanner precision, and wrapper signal
+fidelity.
+
+Non-negotiable invariants: preserve the local-only and no-source/chat/raw-diff/
+raw-output contract; never weaken no-follow managed-state protections; keep
+Git/filesystem evidence deterministic and snapshot-bound; fail closed on
+foreign or malformed state while tolerating transient repository
+unavailability; bound persistent metadata and hot-path work; preserve the
+platform-before-wrapper OIDC staging order and owner-controlled 2FA approval;
+do not claim external publication, attestation, or package evidence that was
+not actually produced. Every behavior change requires regression coverage, and
+the final snapshot requires post-cleaner verification plus independent
+code-reviewer APPROVE and architect CLEAR verdicts.

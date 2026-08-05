@@ -3,5 +3,8 @@
 /.relay/
 /.omc/
 /.codex/hooks.json
+/.omx/artifacts/ask-*.md
+/.omx/artifacts/ask-*.txt
+/.omx/artifacts/ask-capture-runner-*.mjs
 .env
 .env.*
