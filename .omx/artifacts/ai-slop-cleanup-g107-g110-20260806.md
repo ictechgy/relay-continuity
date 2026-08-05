@@ -68,3 +68,13 @@ was found. No nested planning escalation was needed.
 No cleanup-specific blocker. Hosted attestation creation and verification can
 only be proven by a future tagged GitHub Actions run; local checks validate the
 workflow definition and deterministic package chain, not external issuance.
+
+## Post-review delta check
+
+The bounded follow-up from `c2e7422` to `258e92c` was rechecked under the same
+cleaner rules. It adds the missing short-lived GitHub CLI authentication and
+attestation-read permission, locks that authority contract with one direct test,
+and corrects scanner boundaries for file URLs and non-ASCII relative paths.
+Fallback, workaround, TODO, and FIXME inventory was empty. Focused workflow,
+scanner, syntax, YAML, privacy, and whitespace checks passed; no cleanup edit or
+planning escalation was required.
