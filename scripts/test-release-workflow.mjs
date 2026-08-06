@@ -6,6 +6,50 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflow = await readFile(resolve(root, ".github/workflows/release.yml"), "utf8");
+const ciWorkflow = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+
+const githubActionPins = new Map([
+  ["actions/checkout", { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", version: "v7.0.1", count: 5 }],
+  ["actions/upload-artifact", { sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", version: "v7.0.1", count: 3 }],
+  ["actions/download-artifact", { sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", version: "v8.0.1", count: 2 }],
+  ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0", count: 1 }]
+]);
+const actionCounts = new Map([...githubActionPins.keys()].map((action) => [action, 0]));
+const combinedWorkflows = `${ciWorkflow}\n${workflow}`;
+
+for (const [sourceName, source] of [
+  ["ci", ciWorkflow],
+  ["release", workflow]
+]) {
+  for (const [index, line] of source.split(/\r?\n/).entries()) {
+    const uses = line.match(/^\s*(?:-\s*)?uses\s*:\s*(?:"([^"]*)"|'([^']*)'|([^#]*?))(?:\s+#\s*(.*?)\s*)?$/);
+    if (!uses) continue;
+
+    const value = (uses[1] ?? uses[2] ?? uses[3]).trim();
+    const comment = uses[4]?.trim();
+    const action = [...githubActionPins.keys()].find((candidate) => value.startsWith(`${candidate}@`));
+    if (!action) continue;
+
+    const approved = githubActionPins.get(action);
+    if (value !== `${action}@${approved.sha}` || comment !== approved.version) {
+      throw new Error(`${sourceName} workflow line ${index + 1} uses an unapproved ${action} pin`);
+    }
+    actionCounts.set(action, actionCounts.get(action) + 1);
+  }
+}
+for (const [action, approved] of githubActionPins) {
+  const actual = actionCounts.get(action);
+  if (actual !== approved.count) {
+    throw new Error(`workflows must use ${action} exactly ${approved.count} times, found ${actual}`);
+  }
+  const rawReferences = combinedWorkflows.match(new RegExp(`${action}@`, "g"))?.length ?? 0;
+  if (rawReferences !== actual) {
+    throw new Error(`workflows contain an unparsed ${action} reference`);
+  }
+}
+if (!/actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n          registry-url: https:\/\/registry\.npmjs\.org\n          package-manager-cache: false\n/.test(workflow)) {
+  throw new Error("release workflow must disable setup-node package-manager caching explicitly");
+}
 
 const contracts = [
   [
