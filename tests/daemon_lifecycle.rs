@@ -63,6 +63,46 @@ fn run(root: &Path, args: &[&str]) -> std::process::Output {
         .output()
         .expect("run relay")
 }
+#[cfg(unix)]
+fn run_with_timeout(
+    root: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<std::process::Output, String> {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(args)
+        .current_dir(root)
+        .env("RELAY_STATE_HOME", test_state_home(root))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("start relay: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("collect relay output: {error}"));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let kill_error = child.kill().err();
+                let reap_error = child.wait().err();
+                return Err(format!(
+                    "relay exceeded {timeout:?}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                ));
+            }
+            Err(error) => {
+                let kill_error = child.kill().err();
+                let reap_error = child.wait().err();
+                return Err(format!(
+                    "inspect relay child: {error}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                ));
+            }
+        }
+    }
+}
 fn run_from(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
@@ -1030,9 +1070,12 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
     fs::write(&target, "PRECIOUS").expect("write owned target");
     fs::remove_file(&owned_path).expect("remove owned state");
     symlink(&target, &owned_path).expect("install owned symlink");
-    let started = Instant::now();
-    let symlinked = run(&root, &["integration", "emit", "codex"]);
-    assert!(started.elapsed() < Duration::from_secs(2));
+    let symlinked = run_with_timeout(
+        &root,
+        &["integration", "emit", "codex"],
+        Duration::from_secs(2),
+    )
+    .expect("symlinked owned state must not block integration emit");
     assert!(symlinked.status.success());
     assert!(String::from_utf8_lossy(&symlinked.stdout).contains("integration drifted"));
     assert_eq!(
@@ -1042,9 +1085,12 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
 
     fs::remove_file(&owned_path).expect("remove owned symlink");
     fs::write(&owned_path, vec![b'x'; 64 * 1024 + 1]).expect("write oversized owned state");
-    let started = Instant::now();
-    let oversized = run(&root, &["integration", "emit", "codex"]);
-    assert!(started.elapsed() < Duration::from_secs(2));
+    let oversized = run_with_timeout(
+        &root,
+        &["integration", "emit", "codex"],
+        Duration::from_secs(2),
+    )
+    .expect("oversized owned state must not block integration emit");
     assert!(oversized.status.success());
     assert!(String::from_utf8_lossy(&oversized.stdout).contains("integration drifted"));
 

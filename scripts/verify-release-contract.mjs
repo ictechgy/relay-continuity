@@ -38,13 +38,13 @@ export function cargoPackageVersion(contents) {
   if (!packageSection) throw new Error("Cargo.toml has no [package] section");
   const versions = [
     ...packageSection[1].matchAll(
-      /^[ \t]*version[ \t]*=[ \t]*"([0-9A-Za-z.+-]+)"[ \t]*(?:#[^\r\n]*)?\r?$/gm
+      /^[ \t]*version[ \t]*=[ \t]*(?:"([0-9A-Za-z.+-]+)"|'([0-9A-Za-z.+-]+)')[ \t]*(?:#[^\r\n]*)?\r?$/gm
     )
   ];
   if (versions.length !== 1) {
     throw new Error("Cargo.toml [package] must contain exactly one literal version");
   }
-  return versions[0][1];
+  return versions[0][1] ?? versions[0][2];
 }
 
 function sameFile(left, right) {

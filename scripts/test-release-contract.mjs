@@ -58,6 +58,12 @@ try {
   );
   await writeFile(cargoPath, cargo("0.2.0-rc.9").replaceAll("\n", "\r\n"));
   expectStatus(run(cargoPath, "push", "tag", "v0.2.0-rc.9"), 0, "CRLF Cargo.toml");
+  await writeFile(cargoPath, cargo("0.2.0-rc.9").replace('"0.2.0-rc.9"', "'0.2.0-rc.9'"));
+  expectStatus(
+    run(cargoPath, "push", "tag", "v0.2.0-rc.9"),
+    0,
+    "single-quoted literal package version"
+  );
   await writeFile(cargoPath, cargo("0.2.0-rc.9"));
 
   const rejected = [
@@ -78,6 +84,13 @@ try {
 
   await writeFile(cargoPath, cargo("1.2.3", 'version = "9.9.9"'));
   expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "duplicate package version");
+
+  await writeFile(cargoPath, cargo("1.2.3", "version = '9.9.9'"));
+  expectStatus(
+    run(cargoPath, "push", "tag", "v1.2.3"),
+    1,
+    "mixed-quote duplicate package version"
+  );
 
   await writeFile(cargoPath, cargo(`1.2.3-${"a".repeat(257)}`));
   expectStatus(run(cargoPath, "push", "tag", "v1.2.3-oversized"), 1, "oversized version");
