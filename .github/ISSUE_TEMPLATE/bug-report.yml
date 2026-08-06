@@ -12,7 +12,7 @@ body:
     id: version
     attributes:
       label: Relay version or commit
-      description: "Example: 0.2.0-rc.6. Do not include a local path."
+      description: "Example: 0.2.0-rc.9. Use `relay --version`; do not include a local path."
     validations:
       required: true
   - type: dropdown
@@ -36,6 +36,19 @@ body:
         - GitHub Release binary
         - Source build
         - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: doctor_category
+    attributes:
+      label: Read-only doctor result
+      description: Run `relay doctor` in the affected repository and select only its overall fixed category. Do not paste other command output.
+      options:
+        - healthy
+        - degraded
+        - broken
+        - unavailable
+        - not run
     validations:
       required: true
   - type: textarea

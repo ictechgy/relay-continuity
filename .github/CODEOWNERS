@@ -1,0 +1,10 @@
+* @ictechgy
+
+/.github/ @ictechgy
+/scripts/ @ictechgy
+/packages/ @ictechgy
+/src/ @ictechgy
+/tests/ @ictechgy
+/Cargo.toml @ictechgy
+/Cargo.lock @ictechgy
+/rust-toolchain.toml @ictechgy

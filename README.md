@@ -7,6 +7,9 @@ raw command output.
 
 > v0.2.0-rc.9 is a prerelease. It is not a transcript recovery tool and
 > cannot universally observe an AI tool's quota, internal reasoning, or UI.
+> The published rc.9 Linux binary requires glibc 2.39; on older Linux systems,
+> build from source until a later tag publishes the portable musl artifact
+> produced by the current release workflow.
 
 ## Trust model
 
@@ -48,11 +51,19 @@ Ensure `$HOME/.local/bin` is on your `PATH`, then initialize the current Git
 repository you want Relay to observe and inspect the first card:
 
 ```sh
+relay --version
 cd /path/to/your/project
 relay init
+relay doctor
 relay status
 relay resume
 ```
+
+`relay doctor` is a read-only, privacy-bounded setup check. `relay doctor
+--json` emits the same fixed diagnostic states as schema version 1 for issue
+triage. It does not create, migrate, repair, quarantine, compact, or enable
+anything, and it omits repository names, paths, branch names, annotations, and
+raw errors.
 
 To enable automatic capture, preview and install the template for your platform
 with the commands in [Local capture service](#local-capture-service), then
@@ -75,10 +86,14 @@ platform-specific release binaries.
 ## Development
 
 `cargo test` runs the local test suite. The project is local-only by design.
-Tags beginning with `v` build a macOS and Linux binary plus a SHA-256 checksum
-and GitHub artifact attestation for each platform. Before publishing a public
-release, verify the workflow artifacts, attestations, and checksums against the
-tagged commit.
+A tag-triggered release runs only when the tag is exactly `v` plus the Cargo
+package SemVer. It builds macOS binaries and a statically linked
+`x86_64-unknown-linux-musl` binary, plus a SHA-256 checksum and GitHub artifact
+attestation for each platform. The Linux artifact is rejected if it retains a
+dynamic ELF dependency or GLIBC symbol contract and is executed in pinned
+Ubuntu 22.04 and Debian 12 containers before packaging. Before publishing a
+public release, verify the workflow artifacts, attestations, and checksums
+against the tagged commit.
 The checked-in `rust-toolchain.toml` pins release and CI builds to Rust 1.97.1
 so a tag is rebuilt with the same compiler version.
 
@@ -218,14 +233,14 @@ refuses to remove it.
 
 ### Claude and Grok
 
-Relay probes providers before enabling them. This checkout's Claude CLI is
-present but currently reports unauthenticated, so its runtime hook contract is
-intentionally `unavailable`. Grok Build's installed documentation explicitly
-states that stdout from passive `SessionStart` hooks is ignored; therefore it
-cannot safely provide an automatic model-context card through that hook. Relay
-keeps both adapters unavailable instead of pretending that a hook which only
-runs local code injected context. The generic evidence core and `relay resume`
-continue to work without either adapter.
+Relay probes model-visible provider contracts before enabling them. No
+authenticated, repository-scoped Claude hook contract has yet been proven to
+deliver Relay's bounded output to the model, and Grok's passive `SessionStart`
+hook does not make stdout model-visible. Relay therefore keeps both adapters
+`unavailable` instead of equating local hook execution with successful context
+injection. Provider login state alone does not change this contract. The
+generic evidence core and `relay resume` continue to work without either
+adapter.
 
 Use `relay integration status` to inspect `disabled`, `awaiting_trust`,
 `ready`, `unavailable`, `drifted`, or `broken`. These states are local,

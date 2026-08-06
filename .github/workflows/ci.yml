@@ -13,10 +13,11 @@ concurrency:
 
 jobs:
   test:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,6 +41,15 @@ jobs:
           cp target/release/relay "$executable"
           "$executable" integration service plan systemd > "$fixture/relay.service"
           systemd-analyze verify "$fixture/relay.service"
+      - name: Verify adversarial launchd service rendering
+        if: runner.os == 'macOS'
+        run: |
+          fixture="$(mktemp -d)"
+          executable="$fixture/relay \$HOME/%h/한글 & <plist>"
+          mkdir -p "$(dirname "$executable")"
+          cp target/release/relay "$executable"
+          "$executable" integration service plan launchd > "$fixture/relay.plist"
+          plutil -lint "$fixture/relay.plist"
       - name: Validate distribution scripts
         run: |
           node --check packages/relay/bin/relay.js
@@ -69,7 +79,8 @@ jobs:
 
   audit:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
