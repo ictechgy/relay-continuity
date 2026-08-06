@@ -19,7 +19,6 @@ fn sha256(bytes: &[u8]) -> String {
 
 #[cfg(unix)]
 fn state_database(root: &Path) -> PathBuf {
-    let root = fs::canonicalize(root).expect("canonical root");
     let base = std::env::var_os("RELAY_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -34,6 +33,12 @@ fn state_database(root: &Path) -> PathBuf {
                     })
             }
         });
+    state_database_at(root, &base)
+}
+
+#[cfg(unix)]
+fn state_database_at(root: &Path, base: &Path) -> PathBuf {
+    let root = fs::canonicalize(root).expect("canonical root");
     base.join("relay")
         .join(sha256(root.as_os_str().as_bytes()))
         .join("evidence.sqlite")
@@ -61,6 +66,30 @@ fn run_with_home(root: &Path, args: &[&str], home: &Path) -> std::process::Outpu
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .output()
         .expect("run relay with isolated home")
+}
+fn run_with_state_home(root: &Path, args: &[&str], state_home: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(args)
+        .current_dir(root)
+        .env("RELAY_STATE_HOME", state_home)
+        .output()
+        .expect("run relay with isolated state home")
+}
+#[cfg(unix)]
+fn run_with_state_and_user_home(
+    root: &Path,
+    args: &[&str],
+    state_home: &Path,
+    user_home: &Path,
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_relay"))
+        .args(args)
+        .current_dir(root)
+        .env("RELAY_STATE_HOME", state_home)
+        .env("HOME", user_home)
+        .env("XDG_CONFIG_HOME", user_home.join(".config"))
+        .output()
+        .expect("run relay with isolated state and user homes")
 }
 fn run_with_input(root: &Path, args: &[&str], input: &str) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
@@ -142,6 +171,56 @@ fn git_fixture(label: &str) -> PathBuf {
     root
 }
 
+fn assert_doctor_json(output: &std::process::Output) -> String {
+    let body = String::from_utf8(output.stdout.clone()).expect("doctor JSON is UTF-8");
+    assert!(body.len() <= 4096, "doctor output must remain bounded");
+    let parser = Connection::open_in_memory().expect("open JSON parser");
+    let valid: i64 = parser
+        .query_row("SELECT json_valid(?1)", [&body], |row| row.get(0))
+        .expect("parse doctor JSON");
+    assert_eq!(valid, 1, "doctor output must be valid JSON: {body}");
+    let schema_version: i64 = parser
+        .query_row(
+            "SELECT json_extract(?1, '$.schema_version')",
+            [&body],
+            |row| row.get(0),
+        )
+        .expect("read doctor schema version");
+    assert_eq!(schema_version, 1);
+    let relay_version: String = parser
+        .query_row(
+            "SELECT json_extract(?1, '$.relay_version')",
+            [&body],
+            |row| row.get(0),
+        )
+        .expect("read Relay version");
+    assert_eq!(relay_version, env!("CARGO_PKG_VERSION"));
+    let check_count: i64 = parser
+        .query_row(
+            "SELECT json_array_length(json_extract(?1, '$.checks'))",
+            [&body],
+            |row| row.get(0),
+        )
+        .expect("count doctor checks");
+    assert_eq!(check_count, 8);
+    body
+}
+
+fn directory_entry_names(path: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(path)
+        .expect("read directory entries")
+        .map(|entry| {
+            entry
+                .expect("read directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
 #[test]
 fn help_runs_without_creating_evidence_outside_a_git_worktree() {
     let root = std::env::temp_dir().join(format!(
@@ -157,6 +236,574 @@ fn help_runs_without_creating_evidence_outside_a_git_worktree() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("relay init"));
     assert!(!root.join(".relay").exists());
     fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn global_help_version_and_unknown_commands_never_require_or_mutate_a_repository() {
+    let root = std::env::temp_dir().join(format!(
+        "relay-global-cli-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create fixture");
+    let state_home = root.join("state-home-must-not-exist");
+
+    for alias in ["help", "-h", "--help"] {
+        let output = run_with_state_home(&root, &[alias], &state_home);
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("doctor [--json]"));
+        assert!(stdout.contains("warnings or failures exit 1"));
+    }
+    for alias in ["version", "-V", "--version"] {
+        let output = run_with_state_home(&root, &[alias], &state_home);
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!("relay {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    let hostile = "unknown-ghp_cli_secret-/private/operator/path";
+    let unknown = run_with_state_home(&root, &[hostile], &state_home);
+    assert!(!unknown.status.success());
+    assert!(!String::from_utf8_lossy(&unknown.stderr).contains(hostile));
+    let extra_help = run_with_state_home(&root, &["--help", "unexpected"], &state_home);
+    assert!(!extra_help.status.success());
+    assert!(!root.join(".relay").exists());
+    assert!(!state_home.exists());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[test]
+fn doctor_json_is_parseable_bounded_and_side_effect_free_outside_git() {
+    let root = std::env::temp_dir().join(format!(
+        "relay-doctor-outside-git-test-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create fixture");
+    let state_home = root.join("state-home-must-not-exist");
+    let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(output.status.code(), Some(1));
+    let body = assert_doctor_json(&output);
+    assert!(body.contains("\"status\":\"error\""));
+    assert!(body.contains("\"reason\":\"git-unavailable\""));
+    assert!(body.contains("\"reason\":\"repository-unavailable\""));
+    assert!(!body.contains(&root.to_string_lossy().into_owned()));
+    assert!(!root.join(".relay").exists());
+    assert!(!state_home.exists());
+
+    let rejected = run_with_state_home(&root, &["doctor", "--verbose"], &state_home);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("usage: relay doctor [--json]"));
+    assert!(!state_home.exists());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_and_unknown_commands_do_not_initialize_a_fresh_git_repository() {
+    let root = git_fixture("doctor-fresh-repository-test");
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-fresh-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    assert!(!state_home.exists());
+
+    let doctor = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(doctor.status.code(), Some(1));
+    let body = assert_doctor_json(&doctor);
+    assert!(body.contains("managed-state-not-initialized"));
+    assert!(body.contains("evidence-not-initialized"));
+    assert!(!root.join(".relay").exists());
+    assert!(!state_home.exists());
+
+    let unknown = run_with_state_home(&root, &["unknown-command"], &state_home);
+    assert!(!unknown.status.success());
+    assert!(!root.join(".relay").exists());
+    assert!(!state_home.exists());
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_a_healthy_initialized_repository_without_mutating_state() {
+    let root = git_fixture("doctor-healthy-test");
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-healthy-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    let initialized = run_with_state_home(&root, &["init"], &state_home);
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let database = state_database_at(&root, &state_home);
+    let database_before = fs::read(&database).expect("read initialized evidence");
+    let entries_before = directory_entry_names(database.parent().expect("evidence parent"));
+
+    let text = run_with_state_home(&root, &["doctor"], &state_home);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).expect("doctor text is UTF-8");
+    assert!(text.len() <= 4096);
+    assert!(text.contains(&format!("relay_version: {}", env!("CARGO_PKG_VERSION"))));
+    assert!(text.contains("status: ok"));
+    assert!(text.contains("evidence: pass (evidence-ready)"));
+    assert!(text.contains("exit_code: 0"));
+
+    let json = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert!(json.status.success());
+    let body = assert_doctor_json(&json);
+    assert!(body.contains("\"status\":\"ok\""));
+    assert_eq!(
+        fs::read(&database).expect("re-read initialized evidence"),
+        database_before
+    );
+    assert_eq!(
+        directory_entry_names(database.parent().expect("evidence parent")),
+        entries_before
+    );
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(state_home).expect("remove isolated state");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("doctor-hostile-evidence-test");
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-hostile-evidence-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    let initialized = run_with_state_home(&root, &["init"], &state_home);
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let database = state_database_at(&root, &state_home);
+    let foreign = b"not-sqlite-ghp_database_secret-/private/operator/path";
+    fs::write(&database, foreign).expect("replace evidence with foreign bytes");
+    fs::write(database.with_file_name("evidence.sqlite-wal"), b"stale-wal")
+        .expect("write stale WAL");
+    let entries_before = directory_entry_names(database.parent().expect("evidence parent"));
+
+    let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(output.status.code(), Some(1));
+    let body = assert_doctor_json(&output);
+    assert!(body.contains("evidence-foreign-header"));
+    assert!(!body.contains("ghp_database_secret"));
+    assert_eq!(fs::read(&database).expect("foreign bytes remain"), foreign);
+    assert_eq!(
+        directory_entry_names(database.parent().expect("evidence parent")),
+        entries_before,
+        "doctor must not quarantine, repair, or add sidecars"
+    );
+
+    fs::remove_file(&database).expect("remove foreign evidence fixture");
+    let empty_hardlink_target = state_home.join("empty-evidence-hardlink-target");
+    fs::File::create(&empty_hardlink_target).expect("create empty hardlink target");
+    fs::hard_link(&empty_hardlink_target, &database).expect("install empty evidence hardlink");
+    let hardlinked = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(hardlinked.status.code(), Some(1));
+    let body = assert_doctor_json(&hardlinked);
+    assert!(body.contains("evidence-path-unsafe"));
+    assert_eq!(
+        fs::metadata(&empty_hardlink_target)
+            .expect("read empty hardlink target")
+            .len(),
+        0
+    );
+    fs::remove_file(&database).expect("remove evidence hardlink fixture");
+    fs::remove_file(&empty_hardlink_target).expect("remove empty hardlink target");
+
+    let outside = state_home.join("outside-ghp_symlink_secret");
+    fs::write(&outside, "PRECIOUS").expect("write symlink target");
+    symlink(&outside, &database).expect("install evidence symlink");
+    let symlinked = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(symlinked.status.code(), Some(1));
+    let body = assert_doctor_json(&symlinked);
+    assert!(body.contains("evidence-path-unsafe"));
+    assert!(!body.contains("ghp_symlink_secret"));
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read target"),
+        "PRECIOUS"
+    );
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(state_home).expect("remove isolated state");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_stale_and_hostile_daemon_residue_without_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("doctor-daemon-residue-test");
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-daemon-residue-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    let initialized = run_with_state_home(&root, &["init"], &state_home);
+    assert!(initialized.status.success());
+    let database = state_database_at(&root, &state_home);
+    let database_before = fs::read(&database).expect("read evidence before doctor");
+    let residue = "ghp_daemon_residue_secret-/private/operator/path";
+    let ready = root.join(".relay/daemon.ready");
+    fs::write(&ready, residue).expect("write orphaned ready residue");
+
+    let stale = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(stale.status.code(), Some(1));
+    let body = assert_doctor_json(&stale);
+    assert!(
+        body.contains("\"name\":\"capture\",\"state\":\"warning\",\"reason\":\"capture-stale\"")
+    );
+    assert!(!body.contains("ghp_daemon_residue_secret"));
+    assert_eq!(fs::read_to_string(&ready).expect("retain residue"), residue);
+    assert_eq!(
+        fs::read(&database).expect("re-read evidence after stale probe"),
+        database_before
+    );
+
+    fs::remove_file(&ready).expect("remove ready fixture");
+    let nonce = "doctor-active-fixture";
+    fs::write(
+        root.join(".relay/daemon.pid"),
+        format!("{}\n{nonce}", std::process::id()),
+    )
+    .expect("write active PID fixture");
+    let ready_target = root.join("ghp_daemon_ready_symlink_target");
+    fs::write(&ready_target, nonce).expect("write ready symlink target");
+    symlink(&ready_target, &ready).expect("install active ready symlink");
+    let hostile_ready = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(hostile_ready.status.code(), Some(1));
+    let body = assert_doctor_json(&hostile_ready);
+    assert!(body.contains(
+        "\"name\":\"capture\",\"state\":\"fail\",\"reason\":\"capture-inspection-failed\""
+    ));
+    assert!(!body.contains("ghp_daemon_ready_symlink_target"));
+    assert_eq!(
+        fs::read_to_string(&ready_target).expect("read ready symlink target"),
+        nonce
+    );
+    fs::remove_file(&ready).expect("remove active ready symlink");
+    fs::remove_file(&ready_target).expect("remove ready symlink target");
+    fs::write(&ready, nonce).expect("write safe active ready fixture");
+    let degraded = root.join(".relay/daemon.degraded");
+    fs::write(&degraded, [0xff, 0xfe]).expect("write invalid degraded fixture");
+    let invalid_degraded = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(invalid_degraded.status.code(), Some(1));
+    let body = assert_doctor_json(&invalid_degraded);
+    assert!(body.contains("capture-inspection-failed"));
+    assert_eq!(
+        fs::read(&degraded).expect("retain invalid degraded fixture"),
+        [0xff, 0xfe]
+    );
+    fs::remove_file(&degraded).expect("remove invalid degraded fixture");
+    fs::remove_file(&ready).expect("remove safe ready fixture");
+    fs::remove_file(root.join(".relay/daemon.pid")).expect("remove active PID fixture");
+
+    let outside = root.join("ghp_daemon_symlink_target");
+    fs::write(&outside, "PRECIOUS").expect("write daemon symlink target");
+    symlink(&outside, root.join(".relay/daemon.stop")).expect("install daemon stop symlink");
+    let hostile = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(hostile.status.code(), Some(1));
+    let body = assert_doctor_json(&hostile);
+    assert!(body.contains("capture-inspection-failed"));
+    assert!(!body.contains("ghp_daemon_symlink_target"));
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read daemon symlink target"),
+        "PRECIOUS"
+    );
+    assert_eq!(
+        fs::read(&database).expect("re-read evidence after hostile probe"),
+        database_before
+    );
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(state_home).expect("remove isolated state");
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_mutation() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("doctor-integration-drift-test");
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-integration-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    let initialized = run_with_state_home(&root, &["init"], &state_home);
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    assert!(
+        run_with_state_home(
+            &root,
+            &["integration", "codex", "install", "--apply"],
+            &state_home,
+        )
+        .status
+        .success()
+    );
+    let manifest_path = root.join(".relay/integrations/codex.state");
+    let hostile = "ghp_manifest_secret-/private/operator/path";
+    let manifest = fs::read_to_string(&manifest_path).expect("read integration manifest");
+    let drifted = manifest
+        .lines()
+        .map(|line| {
+            if line.starts_with("root_hash=") {
+                format!("root_hash={hostile}")
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&manifest_path, &drifted).expect("write drifted manifest");
+
+    let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(output.status.code(), Some(1));
+    let body = assert_doctor_json(&output);
+    assert!(body.contains("integration-drifted"));
+    assert!(!body.contains(hostile));
+    assert!(!body.contains(&root.to_string_lossy().into_owned()));
+    assert_eq!(
+        fs::read_to_string(&manifest_path).expect("re-read manifest"),
+        drifted
+    );
+
+    fs::write(&manifest_path, &manifest).expect("restore valid manifest fixture");
+    fs::remove_file(&manifest_path).expect("remove integration manifest fixture");
+    let orphaned = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(orphaned.status.code(), Some(1));
+    let body = assert_doctor_json(&orphaned);
+    assert!(body.contains(
+        "\"name\":\"integration_codex\",\"state\":\"fail\",\"reason\":\"integration-drifted\""
+    ));
+    assert!(root.join(".relay/integrations/codex.owned").exists());
+    assert!(root.join(".codex/hooks.json").exists());
+
+    fs::remove_file(root.join(".relay/integrations/codex.owned"))
+        .expect("remove orphaned owned-state fixture");
+    let unowned_relay_hook = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(unowned_relay_hook.status.code(), Some(1));
+    let body = assert_doctor_json(&unowned_relay_hook);
+    assert!(body.contains(
+        "\"name\":\"integration_codex\",\"state\":\"warning\",\"reason\":\"integration-unowned-hook\""
+    ));
+    fs::write(root.join(".codex/hooks.json"), "{\"foreign\":true}\n")
+        .expect("replace hook with unrelated foreign fixture");
+    let foreign_hook_only = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert!(foreign_hook_only.status.success());
+    let body = assert_doctor_json(&foreign_hook_only);
+    assert!(body.contains(
+        "\"name\":\"integration_codex\",\"state\":\"pass\",\"reason\":\"integration-disabled\""
+    ));
+    let hook_path = root.join(".codex/hooks.json");
+    fs::remove_file(&hook_path).expect("remove foreign hook fixture");
+    let hook_target = root.join("ghp_unowned_hook_symlink_target");
+    fs::write(&hook_target, "PRECIOUS").expect("write unowned hook symlink target");
+    symlink(&hook_target, &hook_path).expect("install unowned hook symlink");
+    let unsafe_unowned_hook = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(unsafe_unowned_hook.status.code(), Some(1));
+    let body = assert_doctor_json(&unsafe_unowned_hook);
+    assert!(body.contains(
+        "\"name\":\"integration_codex\",\"state\":\"fail\",\"reason\":\"integration-inspection-failed\""
+    ));
+    assert!(!body.contains("ghp_unowned_hook_symlink_target"));
+    assert_eq!(
+        fs::read_to_string(&hook_target).expect("read unowned hook target"),
+        "PRECIOUS"
+    );
+    fs::remove_file(&hook_path).expect("remove unowned hook symlink");
+    fs::remove_file(&hook_target).expect("remove unowned hook target");
+    fs::write(&hook_path, "{\"foreign\":true}\n").expect("restore foreign hook fixture");
+
+    let outside = std::env::temp_dir().join(format!(
+        "relay-doctor-integration-outside-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&outside).expect("create hostile outside directory");
+    let sentinel = outside.join("ghp_manifest_secret");
+    fs::write(&sentinel, "PRECIOUS").expect("write outside sentinel");
+    fs::remove_dir_all(root.join(".relay/integrations")).expect("remove fixture integration dir");
+    symlink(&outside, root.join(".relay/integrations")).expect("install integration symlink");
+    let symlinked = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(symlinked.status.code(), Some(1));
+    let body = assert_doctor_json(&symlinked);
+    assert!(body.contains("integration-inspection-failed"));
+    assert!(!body.contains(hostile));
+    assert_eq!(
+        fs::read_to_string(&sentinel).expect("read outside sentinel"),
+        "PRECIOUS"
+    );
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(state_home).expect("remove isolated state");
+    fs::remove_dir_all(outside).expect("remove outside fixture");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn doctor_checks_the_user_service_with_bounded_no_follow_reads_and_no_mutation() {
+    use std::os::unix::fs::symlink;
+
+    #[cfg(target_os = "macos")]
+    let (kind, relative_service_dir) = ("launchd", "Library/LaunchAgents");
+    #[cfg(target_os = "linux")]
+    let (kind, relative_service_dir) = ("systemd", ".config/systemd/user");
+
+    let root = git_fixture("doctor-service-test");
+    let canonical_temp =
+        fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let state_home = canonical_temp.join(format!("relay-doctor-service-state-{unique}"));
+    let user_home = canonical_temp.join(format!("relay-doctor-service-home-{unique}"));
+    fs::create_dir_all(&user_home).expect("create isolated user home");
+
+    let initialized = run_with_state_and_user_home(&root, &["init"], &state_home, &user_home);
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let installed = run_with_state_and_user_home(
+        &root,
+        &["integration", "service", "install", kind, "--apply"],
+        &state_home,
+        &user_home,
+    );
+    assert!(
+        installed.status.success(),
+        "service install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    let service_dir = user_home.join(relative_service_dir);
+    let service_path = fs::read_dir(&service_dir)
+        .expect("read service directory")
+        .next()
+        .expect("service entry")
+        .expect("read service entry")
+        .path();
+    let installed_bytes = fs::read(&service_path).expect("read installed service");
+    let entries_before = directory_entry_names(&service_dir);
+
+    let healthy =
+        run_with_state_and_user_home(&root, &["doctor", "--json"], &state_home, &user_home);
+    assert!(healthy.status.success());
+    let body = assert_doctor_json(&healthy);
+    assert!(body.contains("service-installed"));
+    assert_eq!(
+        fs::read(&service_path).expect("re-read installed service"),
+        installed_bytes
+    );
+    assert_eq!(directory_entry_names(&service_dir), entries_before);
+
+    let hostile = "ghp_service_secret-/private/operator/path\nExecStart=/bin/sh";
+    fs::write(&service_path, hostile).expect("drift service fixture");
+    let drifted =
+        run_with_state_and_user_home(&root, &["doctor", "--json"], &state_home, &user_home);
+    assert_eq!(drifted.status.code(), Some(1));
+    let body = assert_doctor_json(&drifted);
+    assert!(body.contains("service-drifted"));
+    assert!(!body.contains("ghp_service_secret"));
+    assert_eq!(
+        fs::read_to_string(&service_path).expect("retain drifted service"),
+        hostile
+    );
+
+    fs::remove_file(&service_path).expect("remove drifted service fixture");
+    let oversized = vec![b'x'; 64 * 1024 + 1];
+    fs::write(&service_path, &oversized).expect("write oversized service fixture");
+    let oversized_report =
+        run_with_state_and_user_home(&root, &["doctor", "--json"], &state_home, &user_home);
+    assert_eq!(oversized_report.status.code(), Some(1));
+    let body = assert_doctor_json(&oversized_report);
+    assert!(body.contains("service-inspection-failed"));
+    assert_eq!(
+        fs::metadata(&service_path)
+            .expect("read oversized service")
+            .len(),
+        oversized.len() as u64
+    );
+    fs::remove_file(&service_path).expect("remove oversized service fixture");
+
+    let hardlink_target = user_home.join("service-hardlink-target");
+    fs::write(&hardlink_target, "PRECIOUS-HARDLINK").expect("write service hardlink target");
+    fs::hard_link(&hardlink_target, &service_path).expect("install service hardlink");
+    let hardlinked =
+        run_with_state_and_user_home(&root, &["doctor", "--json"], &state_home, &user_home);
+    assert_eq!(hardlinked.status.code(), Some(1));
+    let body = assert_doctor_json(&hardlinked);
+    assert!(body.contains("service-inspection-failed"));
+    assert_eq!(
+        fs::read_to_string(&hardlink_target).expect("read service hardlink target"),
+        "PRECIOUS-HARDLINK"
+    );
+    fs::remove_file(&service_path).expect("remove service hardlink fixture");
+    fs::remove_file(&hardlink_target).expect("remove service hardlink target");
+
+    let outside = user_home.join("ghp_service_symlink_target");
+    fs::write(&outside, "PRECIOUS").expect("write service symlink target");
+    symlink(&outside, &service_path).expect("install service symlink");
+    let symlinked =
+        run_with_state_and_user_home(&root, &["doctor", "--json"], &state_home, &user_home);
+    assert_eq!(symlinked.status.code(), Some(1));
+    let body = assert_doctor_json(&symlinked);
+    assert!(body.contains("service-inspection-failed"));
+    assert!(!body.contains("ghp_service_symlink_target"));
+    assert_eq!(
+        fs::read_to_string(&outside).expect("read service symlink target"),
+        "PRECIOUS"
+    );
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(state_home).expect("remove isolated state");
+    fs::remove_dir_all(user_home).expect("remove isolated user home");
 }
 
 #[test]
