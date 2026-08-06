@@ -57,6 +57,31 @@ jobs:
           pattern: relay-*
           path: release-assets
           merge-multiple: true
+          # Preserve v8 digest enforcement while bypassing its deprecated unzip-stream path.
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Extract verified native artifact archives
+        run: |
+          expected_archives="$(printf '%s\n' \
+            "relay-linux-x86_64.zip" \
+            "relay-macos-arm64.zip" \
+            "relay-macos-x86_64.zip" | LC_ALL=C sort)"
+          actual_archives="$(find release-assets -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)"
+          test "$actual_archives" = "$expected_archives"
+          for asset in linux-x86_64 macos-x86_64 macos-arm64; do
+            archive="release-assets/relay-$asset.zip"
+            test -f "$archive"
+            test ! -L "$archive"
+            expected="$(printf 'relay-%s\nrelay-%s.sha256\n' "$asset" "$asset" | LC_ALL=C sort)"
+            actual="$(unzip -Z1 "$archive" | LC_ALL=C sort)"
+            test "$actual" = "$expected"
+            unzip -q "$archive" -d release-assets
+            for entry in "relay-$asset" "relay-$asset.sha256"; do
+              test -f "release-assets/$entry"
+              test ! -L "release-assets/$entry"
+            done
+            rm -- "$archive"
+          done
       - name: Verify native build provenance
         env:
           GH_TOKEN: ${{ github.token }}
@@ -100,6 +125,33 @@ jobs:
         with:
           name: npm-packages
           path: npm-packages
+          # Preserve v8 digest enforcement while bypassing its deprecated unzip-stream path.
+          skip-decompress: true
+          digest-mismatch: error
+      - name: Extract verified npm artifact archive
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version"
+          archive="npm-packages/npm-packages.zip"
+          actual_archives="$(find npm-packages -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort)"
+          test "$actual_archives" = "npm-packages.zip"
+          test -f "$archive"
+          test ! -L "$archive"
+          expected="$(printf '%s\n' \
+            "publish-manifest.json" \
+            "publish-order.txt" \
+            "tarballs/ictechgy-relay-$version.tgz" \
+            "tarballs/ictechgy-relay-darwin-arm64-$version.tgz" \
+            "tarballs/ictechgy-relay-darwin-x64-$version.tgz" \
+            "tarballs/ictechgy-relay-linux-x64-$version.tgz" | LC_ALL=C sort)"
+          actual="$(unzip -Z1 "$archive" | LC_ALL=C sort)"
+          test "$actual" = "$expected"
+          unzip -q "$archive" -d npm-packages
+          printf '%s\n' "$actual" | while IFS= read -r entry; do
+            test -f "npm-packages/$entry"
+            test ! -L "npm-packages/$entry"
+          done
+          rm -- "$archive"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'

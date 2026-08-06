@@ -50,6 +50,12 @@ for (const [action, approved] of githubActionPins) {
 if (!/actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n          registry-url: https:\/\/registry\.npmjs\.org\n          package-manager-cache: false\n/.test(workflow)) {
   throw new Error("release workflow must disable setup-node package-manager caching explicitly");
 }
+if ((workflow.match(/skip-decompress: true\n          digest-mismatch: error/g) ?? []).length !== 2) {
+  throw new Error("release workflow must bypass deprecated artifact decompression without weakening digest checks");
+}
+if ((workflow.match(/test ! -L /g) ?? []).length !== 4) {
+  throw new Error("release workflow must reject symlinked artifact payloads after extraction");
+}
 
 const contracts = [
   [
@@ -73,6 +79,14 @@ const contracts = [
   [
     "native payload verification input",
     /node scripts\/verify-npm-packages\.mjs \\\n            --output dist\/npm \\\n            --artifacts release-assets/
+  ],
+  [
+    "verified native artifact extraction",
+    /actual_archives="\$\(find release-assets -mindepth 1 -maxdepth 1 -exec basename \{\} \\; \| LC_ALL=C sort\)"\n          test "\$actual_archives" = "\$expected_archives"[\s\S]*expected="\$\(printf 'relay-%s\\nrelay-%s\.sha256\\n' "\$asset" "\$asset" \| LC_ALL=C sort\)"\n            actual="\$\(unzip -Z1 "\$archive" \| LC_ALL=C sort\)"\n            test "\$actual" = "\$expected"\n            unzip -q "\$archive" -d release-assets/
+  ],
+  [
+    "verified npm artifact extraction",
+    /archive="npm-packages\/npm-packages\.zip"\n          actual_archives="\$\(find npm-packages -mindepth 1 -maxdepth 1 -exec basename \{\} \\; \| LC_ALL=C sort\)"\n          test "\$actual_archives" = "npm-packages\.zip"[\s\S]*actual="\$\(unzip -Z1 "\$archive" \| LC_ALL=C sort\)"\n          test "\$actual" = "\$expected"\n          unzip -q "\$archive" -d npm-packages/
   ]
 ];
 
