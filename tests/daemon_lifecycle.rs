@@ -227,6 +227,16 @@ fn git_fixture(label: &str) -> PathBuf {
     root
 }
 
+#[cfg(unix)]
+struct FixtureCleanup(PathBuf);
+
+#[cfg(unix)]
+impl Drop for FixtureCleanup {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn assert_doctor_json(output: &std::process::Output) -> String {
     let body = String::from_utf8(output.stdout.clone()).expect("doctor JSON is UTF-8");
     assert!(body.len() <= 4096, "doctor output must remain bounded");
@@ -1055,6 +1065,7 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
     use std::os::unix::fs::symlink;
 
     let root = git_fixture("integration-emit-owned-bound-test");
+    let cleanup = FixtureCleanup(root.clone());
     assert!(
         run(&root, &["integration", "codex", "install", "--apply"])
             .status
@@ -1093,8 +1104,8 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
     .expect("oversized owned state must not block integration emit");
     assert!(oversized.status.success());
     assert!(String::from_utf8_lossy(&oversized.stdout).contains("integration drifted"));
-
-    fs::remove_dir_all(root).expect("remove fixture");
+    drop(cleanup);
+    assert!(!root.exists(), "integration emit fixture must be removed");
 }
 
 #[test]
