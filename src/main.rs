@@ -734,25 +734,6 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} integration {state}");
         return Ok(());
     }
-    let Ok(manifest) = integration_manifest_values(root, provider) else {
-        println!("Relay unavailable: {provider} integration unavailable");
-        return Ok(());
-    };
-    let root_hash = hash(root.to_string_lossy().as_bytes());
-    let Ok(owned) = read_managed_file(
-        root,
-        &[".relay", "integrations"],
-        &format!("{provider}.owned"),
-    ) else {
-        println!("Relay unavailable: {provider} integration unavailable");
-        return Ok(());
-    };
-    if manifest.get("root_hash") != Some(&root_hash)
-        || manifest.get("config_hash") != Some(&hash(&owned))
-    {
-        println!("Relay unavailable: {provider} integration drifted");
-        return Ok(());
-    }
     if !daemon_active(root) {
         println!("Relay unavailable: {provider} local evidence unavailable");
         return Ok(());

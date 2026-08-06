@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
@@ -1006,6 +1006,48 @@ fn integration_preflight_preserves_foreign_config_and_initializes_only_relay_own
     assert!(emitted.status.success());
     assert!(String::from_utf8_lossy(&emitted.stdout).contains("integration drifted"));
     assert!(!String::from_utf8_lossy(&emitted.stdout).contains(secret));
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
+    use std::os::unix::fs::symlink;
+
+    let root = git_fixture("integration-emit-owned-bound-test");
+    assert!(
+        run(&root, &["integration", "codex", "install", "--apply"])
+            .status
+            .success()
+    );
+    assert!(
+        run(&root, &["integration", "codex", "trust", "--apply"])
+            .status
+            .success()
+    );
+    let owned_path = root.join(".relay/integrations/codex.owned");
+    let target = root.join("owned-symlink-target");
+    fs::write(&target, "PRECIOUS").expect("write owned target");
+    fs::remove_file(&owned_path).expect("remove owned state");
+    symlink(&target, &owned_path).expect("install owned symlink");
+    let started = Instant::now();
+    let symlinked = run(&root, &["integration", "emit", "codex"]);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(symlinked.status.success());
+    assert!(String::from_utf8_lossy(&symlinked.stdout).contains("integration drifted"));
+    assert_eq!(
+        fs::read_to_string(&target).expect("read owned target"),
+        "PRECIOUS"
+    );
+
+    fs::remove_file(&owned_path).expect("remove owned symlink");
+    fs::write(&owned_path, vec![b'x'; 64 * 1024 + 1]).expect("write oversized owned state");
+    let started = Instant::now();
+    let oversized = run(&root, &["integration", "emit", "codex"]);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(oversized.status.success());
+    assert!(String::from_utf8_lossy(&oversized.stdout).contains("integration drifted"));
+
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
