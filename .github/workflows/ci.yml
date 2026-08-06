@@ -60,6 +60,8 @@ jobs:
           node --check scripts/verify-public-artifacts.mjs
           node --check scripts/test-public-artifacts.mjs
           node --check scripts/test-relay-wrapper.mjs
+          node --check scripts/verify-release-contract.mjs
+          node --check scripts/test-release-contract.mjs
           node --check scripts/test-release-workflow.mjs
           node scripts/verify-npm-packages.mjs --templates
           node scripts/test-package-npm.mjs

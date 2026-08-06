@@ -44,10 +44,9 @@ body:
       label: Read-only doctor result
       description: Run `relay doctor` in the affected repository and select only its overall fixed category. Do not paste other command output.
       options:
-        - healthy
-        - degraded
-        - broken
-        - unavailable
+        - ok
+        - warning
+        - error
         - not run
     validations:
       required: true
