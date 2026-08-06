@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -84,6 +84,16 @@ try {
 
   await writeFile(cargoPath, `${cargo("1.2.3")}#${"x".repeat(1024 * 1024)}`);
   expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "oversized Cargo.toml");
+
+  const symlinkTarget = join(fixture, "Cargo.target.toml");
+  const symlinkPath = join(fixture, "Cargo.symlink.toml");
+  await writeFile(symlinkTarget, cargo("1.2.3"));
+  await symlink(symlinkTarget, symlinkPath);
+  expectStatus(run(symlinkPath, "push", "tag", "v1.2.3"), 1, "symlinked Cargo.toml");
+
+  const directoryPath = join(fixture, "Cargo.directory.toml");
+  await mkdir(directoryPath);
+  expectStatus(run(directoryPath, "push", "tag", "v1.2.3"), 1, "directory Cargo.toml");
 
   await writeFile(cargoPath, `[workspace]\nmembers = []\n`);
   expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "missing package section");

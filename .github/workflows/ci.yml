@@ -68,9 +68,10 @@ jobs:
           node scripts/verify-public-artifacts.mjs
           node scripts/test-public-artifacts.mjs
           node scripts/test-relay-wrapper.mjs
+          node scripts/test-release-contract.mjs
           node scripts/test-release-workflow.mjs
           node --check scripts/render-homebrew-formula.mjs
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          version="$(node --input-type=module -e 'import { readCargoPackageVersion } from "./scripts/verify-release-contract.mjs"; process.stdout.write(await readCargoPackageVersion("Cargo.toml"));')"
           test -n "$version"
           node scripts/render-homebrew-formula.mjs \
             --version "$version" \

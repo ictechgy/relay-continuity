@@ -19,21 +19,7 @@ fn sha256(bytes: &[u8]) -> String {
 
 #[cfg(unix)]
 fn state_database(root: &Path) -> PathBuf {
-    let base = std::env::var_os("RELAY_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
-                PathBuf::from(std::env::var_os("HOME").expect("HOME"))
-                    .join("Library/Application Support")
-            } else {
-                std::env::var_os("XDG_STATE_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| {
-                        PathBuf::from(std::env::var_os("HOME").expect("HOME")).join(".local/state")
-                    })
-            }
-        });
-    state_database_at(root, &base)
+    state_database_at(root, &test_state_home(root))
 }
 
 #[cfg(unix)]
@@ -44,10 +30,36 @@ fn state_database_at(root: &Path, base: &Path) -> PathBuf {
         .join("evidence.sqlite")
 }
 
+fn test_repository_root(cwd: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .expect("resolve fixture Git root");
+    if !output.status.success() {
+        return None;
+    }
+    Some(PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("Git root is UTF-8 in test fixtures")
+            .trim(),
+    ))
+}
+
+fn test_state_home(cwd: &Path) -> PathBuf {
+    match test_repository_root(cwd) {
+        Some(root) => root.join(".git/relay-test-state"),
+        None => fs::canonicalize(cwd)
+            .expect("canonical non-repository fixture")
+            .join(".relay-test-state"),
+    }
+}
+
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
         .current_dir(root)
+        .env("RELAY_STATE_HOME", test_state_home(root))
         .output()
         .expect("run relay")
 }
@@ -55,6 +67,7 @@ fn run_from(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
         .current_dir(cwd)
+        .env("RELAY_STATE_HOME", test_state_home(cwd))
         .output()
         .expect("run relay from nested directory")
 }
@@ -64,6 +77,7 @@ fn run_with_home(root: &Path, args: &[&str], home: &Path) -> std::process::Outpu
         .current_dir(root)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("RELAY_STATE_HOME", test_state_home(root))
         .output()
         .expect("run relay with isolated home")
 }
@@ -95,6 +109,7 @@ fn run_with_input(root: &Path, args: &[&str], input: &str) -> std::process::Outp
     let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
         .current_dir(root)
+        .env("RELAY_STATE_HOME", test_state_home(root))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -111,6 +126,7 @@ fn run_shell_with_input(root: &Path, command: &str, input: &str) -> std::process
     let mut child = Command::new("sh")
         .args(["-c", command])
         .current_dir(root)
+        .env("RELAY_STATE_HOME", test_state_home(root))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -459,6 +475,47 @@ fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
 
 #[cfg(unix)]
 #[test]
+fn doctor_distinguishes_managed_directory_open_failures_from_unsafe_paths() {
+    use std::os::unix::fs::PermissionsExt;
+
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let root = git_fixture("doctor-managed-open-failure-test");
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-managed-open-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    assert!(
+        run_with_state_home(&root, &["init"], &state_home)
+            .status
+            .success()
+    );
+    let managed = root.join(".relay");
+    fs::set_permissions(&managed, fs::Permissions::from_mode(0o000))
+        .expect("make managed directory unreadable");
+    let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    fs::set_permissions(&managed, fs::Permissions::from_mode(0o700))
+        .expect("restore managed directory permissions");
+
+    assert_eq!(output.status.code(), Some(1));
+    let body = assert_doctor_json(&output);
+    assert!(body.contains(
+        "\"name\":\"managed_state\",\"state\":\"fail\",\"reason\":\"managed-state-inspection-failed\""
+    ));
+    assert!(body.contains("\"reason\":\"managed-state-unavailable\""));
+
+    fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_dir_all(state_home).expect("remove isolated state");
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_reports_stale_and_hostile_daemon_residue_without_mutation() {
     use std::os::unix::fs::symlink;
 
@@ -583,8 +640,12 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
         .success()
     );
     let manifest_path = root.join(".relay/integrations/codex.state");
+    let owned_path = root.join(".relay/integrations/codex.owned");
+    let hook_path = root.join(".codex/hooks.json");
     let hostile = "ghp_manifest_secret-/private/operator/path";
     let manifest = fs::read_to_string(&manifest_path).expect("read integration manifest");
+    let owned = fs::read(&owned_path).expect("read integration ownership");
+    let hook = fs::read(&hook_path).expect("read integration hook");
     let drifted = manifest
         .lines()
         .map(|line| {
@@ -611,6 +672,48 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
     );
 
     fs::write(&manifest_path, &manifest).expect("restore valid manifest fixture");
+    let owned_target = root.join("ghp_owned_symlink_target");
+    fs::write(&owned_target, "PRECIOUS").expect("write owned symlink target");
+    fs::remove_file(&owned_path).expect("remove owned fixture");
+    symlink(&owned_target, &owned_path).expect("install owned symlink");
+    let unsafe_owned = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(unsafe_owned.status.code(), Some(1));
+    let body = assert_doctor_json(&unsafe_owned);
+    assert!(body.contains(
+        "\"name\":\"integration_codex\",\"state\":\"fail\",\"reason\":\"integration-inspection-failed\""
+    ));
+    assert!(!body.contains("ghp_owned_symlink_target"));
+    assert_eq!(
+        fs::read_to_string(&owned_target).expect("read owned target"),
+        "PRECIOUS"
+    );
+    fs::remove_file(&owned_path).expect("remove owned symlink");
+    fs::remove_file(&owned_target).expect("remove owned target");
+
+    fs::write(&owned_path, vec![b'x'; 64 * 1024 + 1]).expect("write oversized owned fixture");
+    let oversized_owned = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(oversized_owned.status.code(), Some(1));
+    let body = assert_doctor_json(&oversized_owned);
+    assert!(body.contains("integration-inspection-failed"));
+    fs::write(&owned_path, &owned).expect("restore owned fixture");
+
+    let hook_target = root.join("ghp_manifest_hook_symlink_target");
+    fs::write(&hook_target, "PRECIOUS").expect("write hook symlink target");
+    fs::remove_file(&hook_path).expect("remove hook fixture");
+    symlink(&hook_target, &hook_path).expect("install manifest hook symlink");
+    let unsafe_hook = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(unsafe_hook.status.code(), Some(1));
+    let body = assert_doctor_json(&unsafe_hook);
+    assert!(body.contains("integration-inspection-failed"));
+    assert!(!body.contains("ghp_manifest_hook_symlink_target"));
+    assert_eq!(
+        fs::read_to_string(&hook_target).expect("read hook target"),
+        "PRECIOUS"
+    );
+    fs::remove_file(&hook_path).expect("remove manifest hook symlink");
+    fs::remove_file(&hook_target).expect("remove manifest hook target");
+    fs::write(&hook_path, &hook).expect("restore hook fixture");
+
     fs::remove_file(&manifest_path).expect("remove integration manifest fixture");
     let orphaned = run_with_state_home(&root, &["doctor", "--json"], &state_home);
     assert_eq!(orphaned.status.code(), Some(1));
@@ -637,7 +740,6 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
     assert!(body.contains(
         "\"name\":\"integration_codex\",\"state\":\"pass\",\"reason\":\"integration-disabled\""
     ));
-    let hook_path = root.join(".codex/hooks.json");
     fs::remove_file(&hook_path).expect("remove foreign hook fixture");
     let hook_target = root.join("ghp_unowned_hook_symlink_target");
     fs::write(&hook_target, "PRECIOUS").expect("write unowned hook symlink target");
@@ -800,6 +902,29 @@ fn doctor_checks_the_user_service_with_bounded_no_follow_reads_and_no_mutation()
         fs::read_to_string(&outside).expect("read service symlink target"),
         "PRECIOUS"
     );
+
+    fs::remove_file(&service_path).expect("remove service symlink");
+    fs::remove_file(&outside).expect("remove service symlink target");
+    fs::write(&service_path, &installed_bytes).expect("restore installed service fixture");
+    let real_service_dir = user_home.join("service-directory-target");
+    fs::rename(&service_dir, &real_service_dir).expect("move service directory fixture");
+    symlink(&real_service_dir, &service_dir).expect("install service parent symlink");
+    let symlinked_parent =
+        run_with_state_and_user_home(&root, &["doctor", "--json"], &state_home, &user_home);
+    assert_eq!(symlinked_parent.status.code(), Some(1));
+    let body = assert_doctor_json(&symlinked_parent);
+    assert!(body.contains(
+        "\"name\":\"service\",\"state\":\"fail\",\"reason\":\"service-inspection-failed\""
+    ));
+    assert_eq!(
+        fs::read(
+            real_service_dir.join(service_path.file_name().expect("service fixture file name"))
+        )
+        .expect("read service behind parent symlink"),
+        installed_bytes
+    );
+    fs::remove_file(&service_dir).expect("remove service parent symlink");
+    fs::remove_dir_all(&real_service_dir).expect("remove service directory target");
 
     fs::remove_dir_all(root).expect("remove fixture");
     fs::remove_dir_all(state_home).expect("remove isolated state");
@@ -1263,6 +1388,7 @@ fn service_runner_bootstraps_a_fresh_git_checkout() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(["integration", "service", "run"])
         .current_dir(&root)
+        .env("RELAY_STATE_HOME", test_state_home(&root))
         .spawn()
         .expect("start fresh service runner");
     let ready = root.join(".relay/daemon.ready");
@@ -1965,6 +2091,7 @@ fn concurrent_observers_persist_one_snapshot_transition() {
             Command::new(env!("CARGO_BIN_EXE_relay"))
                 .arg("observe")
                 .current_dir(&root)
+                .env("RELAY_STATE_HOME", test_state_home(&root))
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .spawn()

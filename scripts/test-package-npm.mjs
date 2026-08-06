@@ -48,7 +48,11 @@ async function rewritePackedPackage(fixture, output, directory, mutate) {
   const packed = spawnSync(
     "npm",
     ["pack", "--ignore-scripts", "--pack-destination", destination],
-    { cwd: packageCopy, encoding: "utf8" }
+    {
+      cwd: packageCopy,
+      encoding: "utf8",
+      env: { ...process.env, npm_config_cache: join(staging, "npm-cache") }
+    }
   );
   if (packed.status !== 0) throw new Error(packed.stderr || packed.stdout);
   const filename = packed.stdout.trim().split(/\r?\n/).at(-1);

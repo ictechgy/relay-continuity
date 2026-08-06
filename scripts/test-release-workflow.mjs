@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
-import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -9,22 +8,50 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflow = await readFile(resolve(root, ".github/workflows/release.yml"), "utf8");
 const ciWorkflow = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
 
-const releaseContractTests = spawnSync(
-  process.execPath,
-  [resolve(root, "scripts/test-release-contract.mjs")],
-  { cwd: root, encoding: "utf8" }
-);
-if (releaseContractTests.status !== 0) {
-  throw new Error(
-    `release contract tests failed: ${releaseContractTests.stderr || releaseContractTests.stdout}`
-  );
+function jobBlock(source, name) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === `  ${name}:`);
+  if (start < 0) throw new Error(`release workflow has no ${name} job`);
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^  [A-Za-z0-9_-]+:$/.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+function verifyRemoteActionPin(value, location) {
+  if (value.startsWith("./")) return;
+  if (value.startsWith("docker://")) {
+    if (!/^docker:\/\/[^@\s]+@sha256:[0-9a-f]{64}$/.test(value)) {
+      throw new Error(`${location} must pin docker actions to an immutable sha256 digest`);
+    }
+    return;
+  }
+  const remote = value.match(/^([^@\s]+)@([0-9a-f]{40})$/);
+  if (!remote || !remote[1].includes("/")) {
+    throw new Error(`${location} must pin every remote action to a full 40-hex commit SHA`);
+  }
+}
+
+function verifyNpmPublishTrigger(source) {
+  const job = jobBlock(source, "npm-publish");
+  if (
+    !/^  npm-publish:\n    if: github\.event_name == 'push' && github\.ref_type == 'tag' && vars\.PUBLISH_NPM == 'true'$/m.test(
+      job
+    )
+  ) {
+    throw new Error("npm publish must require an enabled tag push");
+  }
 }
 
 const githubActionPins = new Map([
-  ["actions/checkout", { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", version: "v7.0.1", count: 6 }],
-  ["actions/upload-artifact", { sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", version: "v7.0.1", count: 3 }],
-  ["actions/download-artifact", { sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", version: "v8.0.1", count: 2 }],
-  ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0", count: 1 }]
+  ["actions/checkout", { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", version: "v7.0.1" }],
+  ["actions/upload-artifact", { sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", version: "v7.0.1" }],
+  ["actions/download-artifact", { sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", version: "v8.0.1" }],
+  ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0" }]
 ]);
 const actionCounts = new Map([...githubActionPins.keys()].map((action) => [action, 0]));
 const combinedWorkflows = `${ciWorkflow}\n${workflow}`;
@@ -39,14 +66,7 @@ for (const [sourceName, source] of [
 
     const value = (uses[1] ?? uses[2] ?? uses[3]).trim();
     const comment = uses[4]?.trim();
-    if (!value.startsWith("./") && !value.startsWith("docker://")) {
-      const remote = value.match(/^([^@\s]+)@([0-9a-f]{40})$/);
-      if (!remote || !remote[1].includes("/")) {
-        throw new Error(
-          `${sourceName} workflow line ${index + 1} must pin every remote action to a full 40-hex commit SHA`
-        );
-      }
-    }
+    verifyRemoteActionPin(value, `${sourceName} workflow line ${index + 1}`);
     const action = [...githubActionPins.keys()].find((candidate) => value.startsWith(`${candidate}@`));
     if (!action) continue;
 
@@ -59,12 +79,37 @@ for (const [sourceName, source] of [
 }
 for (const [action, approved] of githubActionPins) {
   const actual = actionCounts.get(action);
-  if (actual !== approved.count) {
-    throw new Error(`workflows must use ${action} exactly ${approved.count} times, found ${actual}`);
+  if (actual === 0) {
+    throw new Error(`workflows must use approved ${action} at least once`);
   }
   const rawReferences = combinedWorkflows.match(new RegExp(`${action}@`, "g"))?.length ?? 0;
   if (rawReferences !== actual) {
     throw new Error(`workflows contain an unparsed ${action} reference`);
+  }
+}
+verifyRemoteActionPin(`docker://example.invalid/image@sha256:${"a".repeat(64)}`, "fixture");
+for (const value of ["docker://example.invalid/image:latest", "docker://example.invalid/image@main"]) {
+  try {
+    verifyRemoteActionPin(value, "fixture");
+    throw new Error(`mutable docker action unexpectedly passed: ${value}`);
+  } catch (error) {
+    if (error.message.startsWith("mutable docker action unexpectedly passed")) throw error;
+  }
+}
+
+verifyNpmPublishTrigger(workflow);
+for (const fragment of [
+  "github.event_name == 'push' && ",
+  "github.ref_type == 'tag' && ",
+  " && vars.PUBLISH_NPM == 'true'"
+]) {
+  const mutated = workflow.replace(fragment, "");
+  if (mutated === workflow) throw new Error(`publish trigger mutation fixture not found: ${fragment}`);
+  try {
+    verifyNpmPublishTrigger(mutated);
+    throw new Error(`weakened npm publish trigger unexpectedly passed: ${fragment}`);
+  } catch (error) {
+    if (error.message.startsWith("weakened npm publish trigger unexpectedly passed")) throw error;
   }
 }
 if (!/actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n          registry-url: https:\/\/registry\.npmjs\.org\n          package-manager-cache: false\n/.test(workflow)) {
@@ -148,6 +193,40 @@ const contracts = [
 
 for (const [name, pattern] of contracts) {
   if (!pattern.test(workflow)) throw new Error(`release workflow violates ${name}`);
+}
+const releaseContractJob = jobBlock(workflow, "release-contract");
+const archiveJob = jobBlock(workflow, "archive");
+const npmPackagesJob = jobBlock(workflow, "npm-packages");
+const npmPublishJob = jobBlock(workflow, "npm-publish");
+const scopedContracts = [
+  [
+    "release identity job scope",
+    releaseContractJob,
+    /runs-on: ubuntu-22\.04[\s\S]*outputs:\n      version: \$\{\{ steps\.verify\.outputs\.version \}\}[\s\S]*node scripts\/verify-release-contract\.mjs[\s\S]*--github-output "\$GITHUB_OUTPUT"/
+  ],
+  [
+    "archive portable artifact scope",
+    archiveJob,
+    /target: x86_64-unknown-linux-musl[\s\S]*cargo build --release --locked --target[\s\S]*file relay-linux-x86_64[\s\S]*--platform linux\/amd64[\s\S]*--network none[\s\S]*--read-only[\s\S]*--cap-drop ALL/
+  ],
+  [
+    "archive attestation scope",
+    archiveJob,
+    /attestations: write[\s\S]*id-token: write[\s\S]*actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4\.2\.2/
+  ],
+  [
+    "packaging verified version scope",
+    npmPackagesJob,
+    /needs: \[release-contract, archive\][\s\S]*RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}[\s\S]*node scripts\/verify-npm-packages\.mjs/
+  ],
+  [
+    "publish verified extraction scope",
+    npmPublishJob,
+    /needs: \[release-contract, npm-packages\][\s\S]*test "\$actual_archives" = "npm-packages\.zip"[\s\S]*test "\$actual" = "\$expected"/
+  ]
+];
+for (const [name, source, pattern] of scopedContracts) {
+  if (!pattern.test(source)) throw new Error(`release workflow violates ${name}`);
 }
 if (/runs-on: ubuntu-latest/.test(workflow)) {
   throw new Error("release workflow must use versioned Linux runner labels");

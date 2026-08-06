@@ -430,17 +430,11 @@ fn read_managed_file_bounded(
     if descriptor < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    let file = unsafe { fs::File::from_raw_fd(descriptor) };
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || metadata.nlink() != 1 || metadata.len() > maximum_bytes {
-        return Err("Relay rejected an unsafe or oversized managed state file".into());
-    }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    std::io::Read::take(file, maximum_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > maximum_bytes {
-        return Err("Relay rejected an unsafe or oversized managed state file".into());
-    }
-    Ok(bytes)
+    read_opened_regular_file_bounded(
+        unsafe { fs::File::from_raw_fd(descriptor) },
+        maximum_bytes,
+        "Relay rejected an unsafe or oversized managed state file",
+    )
 }
 #[cfg(not(unix))]
 fn read_managed_file_bounded(
@@ -457,25 +451,55 @@ fn read_regular_file_no_follow_bounded(
     path: &Path,
     maximum_bytes: u64,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let path = CString::new(path.as_os_str().as_bytes())?;
+    if !path.is_absolute() {
+        return Err("Relay rejected a non-absolute service path".into());
+    }
+    let parent = path.parent().ok_or("Relay service path has no parent")?;
+    let mut directory = open_directory_no_follow(Path::new("/"))?;
+    for component in parent.components() {
+        match component {
+            std::path::Component::RootDir => {}
+            std::path::Component::Normal(component) => {
+                let component = CString::new(component.as_bytes())?;
+                directory = open_directory_at_no_follow(&directory, &component)?;
+            }
+            _ => return Err("Relay rejected an unsafe service path component".into()),
+        }
+    }
+    let file_name = path
+        .file_name()
+        .ok_or("Relay service path has no file name")?;
+    let file_name = CString::new(file_name.as_bytes())?;
     let descriptor = unsafe {
-        libc::open(
-            path.as_ptr(),
+        libc::openat(
+            directory.as_raw_fd(),
+            file_name.as_ptr(),
             libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
         )
     };
     if descriptor < 0 {
         return Err(std::io::Error::last_os_error().into());
     }
-    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    read_opened_regular_file_bounded(
+        unsafe { fs::File::from_raw_fd(descriptor) },
+        maximum_bytes,
+        "Relay rejected an unsafe or oversized file",
+    )
+}
+#[cfg(unix)]
+fn read_opened_regular_file_bounded(
+    file: fs::File,
+    maximum_bytes: u64,
+    rejection: &'static str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.nlink() != 1 || metadata.len() > maximum_bytes {
-        return Err("Relay rejected an unsafe or oversized file".into());
+        return Err(rejection.into());
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     std::io::Read::take(file, maximum_bytes.saturating_add(1)).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > maximum_bytes {
-        return Err("Relay rejected an unsafe or oversized file".into());
+        return Err(rejection.into());
     }
     Ok(bytes)
 }
@@ -561,6 +585,29 @@ fn integration_manifest_bytes(
     }
     Ok(manifest.into_bytes())
 }
+const INTEGRATION_MANAGED_FILE_LIMIT_BYTES: u64 = 64 * 1024;
+fn parse_integration_key_values(
+    bytes: &[u8],
+) -> Option<std::collections::BTreeMap<String, String>> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut values = std::collections::BTreeMap::new();
+    let mut count = 0;
+    for line in text.lines() {
+        count += 1;
+        if count > 16 || line.len() > 256 {
+            return None;
+        }
+        let (key, value) = line.split_once('=')?;
+        if key.is_empty()
+            || value.is_empty()
+            || key.len() > 32
+            || values.insert(key.to_owned(), value.to_owned()).is_some()
+        {
+            return None;
+        }
+    }
+    (!values.is_empty()).then_some(values)
+}
 fn write_integration_manifest(
     root: &Path,
     provider: &str,
@@ -596,32 +643,33 @@ fn codex_hook_matches_manifest(
     let Some(expected) = values.get("hook_hash") else {
         return false;
     };
-    read_managed_file(root, &[".codex"], "hooks.json")
-        .map(|bytes| hash(&bytes) == *expected)
-        .unwrap_or(false)
+    read_managed_file_bounded(
+        root,
+        &[".codex"],
+        "hooks.json",
+        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
+    )
+    .map(|bytes| hash(&bytes) == *expected)
+    .unwrap_or(false)
 }
 fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std::error::Error>> {
     if !integration_provider_is_valid(provider) {
         return Err("Relay rejected an unsupported integration provider".into());
     }
     ensure_integration_directory(root, false)?;
-    let text = match read_managed_file(
+    let manifest = match read_managed_file_bounded(
         root,
         &[".relay", "integrations"],
         &format!("{provider}.state"),
+        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
     ) {
         Err(error) if is_not_found(error.as_ref()) => return Ok("disabled".into()),
         Err(_) => return Ok("broken".into()),
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => return Ok("broken".into()),
-        },
+        Ok(bytes) => bytes,
     };
-    let values = text
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect::<std::collections::BTreeMap<_, _>>();
+    let Some(values) = parse_integration_key_values(&manifest) else {
+        return Ok("broken".into());
+    };
     if values.get("version").map(String::as_str) != Some("1")
         || values.get("provider").map(String::as_str) != Some(provider)
     {
@@ -636,19 +684,15 @@ fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std:
                 return Ok(state.into());
             }
             let root_hash = hash(root.to_string_lossy().as_bytes());
-            let Ok(owned) = read_managed_file(
+            let Ok(owned) = read_managed_file_bounded(
                 root,
                 &[".relay", "integrations"],
                 &format!("{provider}.owned"),
+                INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
             ) else {
                 return Ok("drifted".into());
             };
-            let owned_values = String::from_utf8(owned.clone()).ok().map(|text| {
-                text.lines()
-                    .filter_map(|line| line.split_once('='))
-                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                    .collect::<std::collections::BTreeMap<_, _>>()
-            });
+            let owned_values = parse_integration_key_values(&owned);
             let owned_matches = values.get("config_hash") == Some(&hash(&owned))
                 && owned_values.as_ref().is_some_and(|owned_values| {
                     owned_values.get("version").map(String::as_str) == Some("1")
@@ -675,24 +719,14 @@ fn integration_manifest_values(
     provider: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Box<dyn std::error::Error>> {
     ensure_integration_directory(root, false)?;
-    let text = String::from_utf8(read_managed_file(
+    let bytes = read_managed_file_bounded(
         root,
         &[".relay", "integrations"],
         &format!("{provider}.state"),
-    )?)?;
-    Ok(text
-        .lines()
-        .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-        .collect())
-}
-fn bounded_context(text: &str, limit: usize) -> String {
-    let words = text.split_whitespace().take(limit).collect::<Vec<_>>();
-    if text.split_whitespace().count() > limit {
-        format!("{}\n[Relay context truncated]", words.join(" "))
-    } else {
-        words.join(" ")
-    }
+        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
+    )?;
+    parse_integration_key_values(&bytes)
+        .ok_or_else(|| "Relay rejected malformed integration state".into())
 }
 fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::error::Error>> {
     let state = integration_state(root, provider)?;
@@ -731,10 +765,7 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} local evidence unavailable");
         return Ok(());
     };
-    print!(
-        "{}",
-        bounded_context(&context, AI_INTEGRATION_CARD_MAX_WORDS)
-    );
+    print!("{context}");
     Ok(())
 }
 fn json_escape(value: &str) -> String {
@@ -1411,21 +1442,35 @@ impl Deref for Database {
         &self.connection
     }
 }
-fn state_home_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let base = match env::var_os("RELAY_STATE_HOME") {
-        Some(path) => PathBuf::from(path),
-        None if cfg!(target_os = "macos") => {
+fn default_state_base() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    #[cfg(test)]
+    {
+        Ok(fs::canonicalize(env::temp_dir())?
+            .join(format!("relay-unit-test-state-{}", std::process::id())))
+    }
+    #[cfg(all(not(test), target_os = "macos"))]
+    {
+        Ok(
             PathBuf::from(env::var_os("HOME").ok_or("Relay requires HOME for local state")?)
-                .join("Library/Application Support")
-        }
-        None => PathBuf::from(
+                .join("Library/Application Support"),
+        )
+    }
+    #[cfg(all(not(test), not(target_os = "macos")))]
+    {
+        Ok(PathBuf::from(
             env::var_os("XDG_STATE_HOME")
                 .or_else(|| {
                     env::var_os("HOME")
                         .map(|home| PathBuf::from(home).join(".local/state").into_os_string())
                 })
                 .ok_or("Relay requires XDG_STATE_HOME or HOME for local state")?,
-        ),
+        ))
+    }
+}
+fn state_home_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let base = match env::var_os("RELAY_STATE_HOME") {
+        Some(path) => PathBuf::from(path),
+        None => default_state_base()?,
     };
     if !base.is_absolute() {
         return Err("Relay requires an absolute RELAY_STATE_HOME".into());
@@ -2407,7 +2452,6 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
 
 const HELP_TEXT: &str = "relay init | integration <codex <plan|install --apply|trust --apply|uninstall --apply>|status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | doctor [--json] | check <command>\n\nrelay doctor exits 0 only when every check passes; warnings or failures exit 1.";
 const DOCTOR_OUTPUT_LIMIT_BYTES: usize = 4096;
-const DOCTOR_MANAGED_FILE_LIMIT_BYTES: u64 = 64 * 1024;
 const DOCTOR_SERVICE_FILE_LIMIT_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2651,14 +2695,14 @@ enum DoctorManagedState {
     InspectionFailed,
 }
 
-fn doctor_managed_directory_ready(root: &Path) -> bool {
+fn doctor_managed_directory_ready(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
-        managed_directory_no_follow(root, &[".relay"], false).is_ok()
+        managed_directory_no_follow(root, &[".relay"], false).map(|_| ())
     }
     #[cfg(not(unix))]
     {
-        ensure_managed_directory(root, &[".relay"], false).is_ok()
+        ensure_managed_directory(root, &[".relay"], false)
     }
 }
 
@@ -2680,22 +2724,24 @@ fn doctor_managed_check(root: &Path) -> (DoctorCheck, DoctorManagedState) {
             ),
             DoctorManagedState::Unsafe,
         ),
-        Ok(_) if doctor_managed_directory_ready(root) => (
-            DoctorCheck::new(
-                DoctorCheckName::ManagedState,
-                DoctorCheckState::Pass,
-                DoctorReason::ManagedReady,
+        Ok(_) => match doctor_managed_directory_ready(root) {
+            Ok(()) => (
+                DoctorCheck::new(
+                    DoctorCheckName::ManagedState,
+                    DoctorCheckState::Pass,
+                    DoctorReason::ManagedReady,
+                ),
+                DoctorManagedState::Ready,
             ),
-            DoctorManagedState::Ready,
-        ),
-        Ok(_) => (
-            DoctorCheck::new(
-                DoctorCheckName::ManagedState,
-                DoctorCheckState::Failure,
-                DoctorReason::ManagedPathUnsafe,
+            Err(_) => (
+                DoctorCheck::new(
+                    DoctorCheckName::ManagedState,
+                    DoctorCheckState::Failure,
+                    DoctorReason::ManagedInspectionFailed,
+                ),
+                DoctorManagedState::InspectionFailed,
             ),
-            DoctorManagedState::Unsafe,
-        ),
+        },
         Err(_) => (
             DoctorCheck::new(
                 DoctorCheckName::ManagedState,
@@ -2818,40 +2864,19 @@ fn doctor_evidence_check(_root: &Path) -> DoctorCheck {
     )
 }
 
-fn doctor_key_values(bytes: Vec<u8>) -> Option<std::collections::BTreeMap<String, String>> {
-    let text = String::from_utf8(bytes).ok()?;
-    let mut values = std::collections::BTreeMap::new();
-    let mut count = 0;
-    for line in text.lines() {
-        count += 1;
-        if count > 16 || line.len() > 256 {
-            return None;
-        }
-        let (key, value) = line.split_once('=')?;
-        if key.is_empty()
-            || value.is_empty()
-            || key.len() > 32
-            || values.insert(key.to_owned(), value.to_owned()).is_some()
-        {
-            return None;
-        }
-    }
-    (!values.is_empty()).then_some(values)
-}
-
 fn doctor_integration_state(root: &Path, provider: &str) -> DoctorReason {
     let manifest = match read_managed_file_bounded(
         root,
         &[".relay", "integrations"],
         &format!("{provider}.state"),
-        DOCTOR_MANAGED_FILE_LIMIT_BYTES,
+        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
     ) {
         Err(error) if is_not_found(error.as_ref()) => {
             return match read_managed_file_bounded(
                 root,
                 &[".relay", "integrations"],
                 &format!("{provider}.owned"),
-                DOCTOR_MANAGED_FILE_LIMIT_BYTES,
+                INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
             ) {
                 Err(error) if is_not_found(error.as_ref()) => {
                     if provider != "codex" {
@@ -2861,7 +2886,7 @@ fn doctor_integration_state(root: &Path, provider: &str) -> DoctorReason {
                         root,
                         &[".codex"],
                         "hooks.json",
-                        DOCTOR_MANAGED_FILE_LIMIT_BYTES,
+                        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
                     ) {
                         Err(error) if is_not_found(error.as_ref()) => {
                             DoctorReason::IntegrationDisabled
@@ -2883,7 +2908,7 @@ fn doctor_integration_state(root: &Path, provider: &str) -> DoctorReason {
         Err(_) => return DoctorReason::IntegrationInspectionFailed,
         Ok(manifest) => manifest,
     };
-    let Some(values) = doctor_key_values(manifest) else {
+    let Some(values) = parse_integration_key_values(&manifest) else {
         return DoctorReason::IntegrationBroken;
     };
     if values.get("version").map(String::as_str) != Some("1")
@@ -2901,12 +2926,13 @@ fn doctor_integration_state(root: &Path, provider: &str) -> DoctorReason {
         root,
         &[".relay", "integrations"],
         &format!("{provider}.owned"),
-        DOCTOR_MANAGED_FILE_LIMIT_BYTES,
+        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
     ) {
         Ok(owned) => owned,
-        Err(_) => return DoctorReason::IntegrationDrifted,
+        Err(error) if is_not_found(error.as_ref()) => return DoctorReason::IntegrationDrifted,
+        Err(_) => return DoctorReason::IntegrationInspectionFailed,
     };
-    let Some(owned_values) = doctor_key_values(owned.clone()) else {
+    let Some(owned_values) = parse_integration_key_values(&owned) else {
         return DoctorReason::IntegrationDrifted;
     };
     let root_hash = hash(root.to_string_lossy().as_bytes());
@@ -2923,10 +2949,13 @@ fn doctor_integration_state(root: &Path, provider: &str) -> DoctorReason {
             root,
             &[".codex"],
             "hooks.json",
-            DOCTOR_MANAGED_FILE_LIMIT_BYTES,
+            INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
         ) {
             Ok(hook) => hook,
-            Err(_) => return DoctorReason::IntegrationDrifted,
+            Err(error) if is_not_found(error.as_ref()) => {
+                return DoctorReason::IntegrationDrifted;
+            }
+            Err(_) => return DoctorReason::IntegrationInspectionFailed,
         };
         if values.get("hook_hash") != Some(&hash(&hook)) {
             return DoctorReason::IntegrationDrifted;
