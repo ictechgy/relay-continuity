@@ -2558,12 +2558,12 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
     let wrapper_directory = root.join("git-wrapper-bin");
     fs::create_dir(&wrapper_directory).expect("create Git wrapper directory");
     let wrapper = wrapper_directory.join("git");
-    let status_log = root.join("relay-git-status-args.log");
+    let status_log = root.join(".git/relay-git-status-args.log");
     let guarded_variables = GIT_REPOSITORY_ENV_REMOVALS.join(" ");
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor variable in {guarded_variables}; do\n  eval \"value=\\${{$variable-}}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${{GIT_OPTIONAL_LOCKS:-}}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${{GIT_NO_LAZY_FETCH:-}}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${{GIT_ASKPASS:-}}\" != \"preserve-sentinel\" ] || [ \"${{GIT_CONFIG_GLOBAL:-}}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nif [ \"${{1:-}}\" = \"status\" ]; then\n  printf '%s\\n' \"$*\" > \"$RELAY_TEST_GIT_STATUS_LOG\"\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n"
+            "#!/bin/sh\nfor variable in {guarded_variables}; do\n  eval \"value=\\${{$variable-}}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${{GIT_OPTIONAL_LOCKS:-}}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${{GIT_NO_LAZY_FETCH:-}}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${{GIT_ASKPASS:-}}\" != \"preserve-sentinel\" ] || [ \"${{GIT_CONFIG_GLOBAL:-}}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nif [ \"${{1:-}}\" = \"status\" ]; then\n  printf '%s\\n' \"$*\" >> \"$RELAY_TEST_GIT_STATUS_LOG\"\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n"
         ),
     )
     .expect("write Git wrapper");
@@ -2601,10 +2601,19 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
         "read-only observation competed for Git's index lock: {}",
         String::from_utf8_lossy(&observed.stderr)
     );
-    assert_eq!(
-        fs::read_to_string(&status_log).expect("read observed Git status arguments"),
-        include_str!("fixtures/dirty-git-status-args.txt"),
-        "Relay production Git status arguments drifted from the release smoke contract"
+    let observed_status_arguments =
+        fs::read_to_string(&status_log).expect("read observed Git status arguments");
+    let expected_status_arguments = include_str!("fixtures/dirty-git-status-args.txt").trim_end();
+    let status_invocations = observed_status_arguments.lines().collect::<Vec<_>>();
+    assert!(
+        !status_invocations.is_empty(),
+        "Relay never invoked Git status"
+    );
+    assert!(
+        status_invocations
+            .iter()
+            .all(|arguments| *arguments == expected_status_arguments),
+        "Relay production Git status arguments drifted from the release smoke contract: {status_invocations:?}"
     );
     assert_eq!(
         fs::read_to_string(root.join(".git/index.lock")).expect("read Git index lock"),
