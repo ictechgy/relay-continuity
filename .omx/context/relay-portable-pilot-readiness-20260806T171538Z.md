@@ -10,9 +10,9 @@
 ## User request
 
 Continue all worthwhile remaining Relay work with Ralplan where needed and
-Ultragoal execution. Brainstorm additions with Claude, Grok, and Agy, select
-the ideas that are worth implementing now, and carry them through durable
-goals, implementation, verification, and review.
+Ultragoal execution. Evaluate independent roadmap inputs, select the ideas
+that are worth implementing now, and carry them through durable goals,
+implementation, verification, and review.
 
 ## Product constraints
 
@@ -52,27 +52,6 @@ goals, implementation, verification, and review.
    explicitly uses `@next`; changing dist-tags remains an authenticated owner
    policy decision rather than a repository-local proof.
 
-## Advisor evidence
-
-- Claude evidence:
-  `.omx/artifacts/ask-claude-relay-roadmap-brainstorm-20260806T165418Z.md`
-  with terminal `BRAINSTORM: COMPLETE`. It prioritized an adversarial rendering
-  corpus, a redacted side-effect-free `relay doctor`, and distribution truth.
-- Grok evidence:
-  `.omx/artifacts/ask-grok-relay-roadmap-brainstorm-20260806T165418Z.md`
-  with terminal `BRAINSTORM: COMPLETE`. It prioritized repository/distribution
-  hygiene and an offline doctor; it also proposed bounded export and compact
-  dry-run as later candidates.
-- Agy evidence:
-  `.omx/artifacts/ask-agy-relay-roadmap-brainstorm-20260806T165418Z.md` is an
-  `ASK_INVALID_OUTPUT` record. Repeated isolated attempts returned no output;
-  the final external execution request was blocked by the local usage limit.
-  No recommendation is attributed to Agy.
-- Repository explorer: recommended provider-neutral context JSON,
-  `integration status --json`, typed phases, doctor, a privacy-safe timeline,
-  change-kind counts, shell-free checks, and daemon heartbeat. It identified
-  doctor as the strongest near-term support feature.
-
 ## Official upstream research
 
 - GitHub-hosted runner documentation identifies `ubuntu-latest` as a moving
@@ -88,7 +67,9 @@ goals, implementation, verification, and review.
    assert no dynamic `NEEDED`/GLIBC contract, and execute it in pinned older
    Linux runtime containers.
 2. Add a separately testable release-contract validator binding push tags to
-   the exact Cargo SemVer before archive/npm work.
+   the exact Cargo SemVer before release authority. Require an exact-head hosted
+   branch rehearsal in which the contract succeeds while every authority job
+   is skipped and no artifact or attestation is emitted.
 3. Add global help/version/error behavior and a side-effect-free,
    privacy-bounded `relay doctor` suitable for pilot issue reports.
 4. Extend adversarial AI-card tests and repository quality gates, review
@@ -108,10 +89,10 @@ goals, implementation, verification, and review.
 - Apple signing/notarization, npm `latest` mutation, rulesets, and GA promotion:
   authenticated or policy-bearing external actions, recorded as follow-ups.
 
-## Planning mode and available roles
+## Planning provenance
 
-The work changes the public distribution compatibility contract, so Ralplan
-uses deliberate mode. Native role selectors available are `architect`,
-`critic`, `code-reviewer`, `explorer`, `worker`, and `default`. Strict consensus
-will run sequentially as Architect then Critic with `agent_type` as the
-selector. No surrogate role is needed.
+| Field | Value |
+| --- | --- |
+| Status | `RALPLAN_CONSENSUS_COMPLETE` |
+| Source snapshot | `3bd67c5d3ed04bab389672389bf5ad542cb58a1f` |
+| Reason code | `REQUIRED_LANES_APPROVED` |

@@ -9,44 +9,33 @@
     ".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md",
     ".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"
   ],
-  "advisorArtifacts": {
-    "claude": {
-      "path": ".omx/artifacts/ask-claude-relay-roadmap-brainstorm-20260806T165418Z.md",
-      "status": "BRAINSTORM_COMPLETE"
-    },
-    "grok": {
-      "path": ".omx/artifacts/ask-grok-relay-roadmap-brainstorm-20260806T165418Z.md",
-      "status": "BRAINSTORM_COMPLETE"
-    },
-    "agy": {
-      "path": ".omx/artifacts/ask-agy-relay-roadmap-brainstorm-20260806T165418Z.md",
-      "status": "ASK_INVALID_OUTPUT",
-      "acceptedAsAdvisorEvidence": false
-    }
-  },
   "spawnMode": "role-selectable-native",
   "selectedSelectorField": "agent_type",
   "taskNameIsRoleSelector": false,
   "agentDefinitionBackedFallback": false,
   "independentLanes": true,
-  "sequentialOrder": ["architect", "critic"],
+  "sequentialOrder": ["architecture", "critical-review"],
   "surrogateReviewsUsed": false,
-  "architect": {
-    "status": "APPROVE",
-    "iteration": 1,
-    "snapshot": "3bd67c5d3ed04bab389672389bf5ad542cb58a1f",
-    "steelman": "Prioritize provider-neutral context JSON for visible product value.",
-    "synthesis": "Release truth and interpretable pilot diagnostics precede a new API boundary."
-  },
-  "critic": {
-    "status": "APPROVE",
-    "iteration": 2,
-    "snapshot": "3bd67c5d3ed04bab389672389bf5ad542cb58a1f",
-    "nonBlockingNote": "Resolve and record immutable Ubuntu and Debian image digests during implementation."
-  },
+  "consensusLanes": [
+    {
+      "lane": "ARCHITECTURE",
+      "status": "APPROVE",
+      "iteration": 1,
+      "snapshot": "3bd67c5d3ed04bab389672389bf5ad542cb58a1f",
+      "reasonCodes": ["SCOPE_SEQUENCE_ACCEPTED"]
+    },
+    {
+      "lane": "CRITICAL_REVIEW",
+      "status": "APPROVE",
+      "iteration": 2,
+      "snapshot": "3bd67c5d3ed04bab389672389bf5ad542cb58a1f",
+      "reasonCodes": ["EXECUTION_READY"]
+    }
+  ],
   "ralplan_consensus_gate": {
-    "complete": true,
-    "reason": "Sequential native Architect and Critic reviews both approved the execution-ready plan."
+    "status": "COMPLETE",
+    "snapshot": "3bd67c5d3ed04bab389672389bf5ad542cb58a1f",
+    "reasonCodes": ["REQUIRED_LANES_APPROVED"]
   },
-  "nextAction": "Execute G112-G115 with Ultragoal; do not claim owner-gated publication or GA work."
+  "nextActionCode": "EXECUTE_G112_G115_WITHOUT_EXTERNAL_AUTHORITY"
 }

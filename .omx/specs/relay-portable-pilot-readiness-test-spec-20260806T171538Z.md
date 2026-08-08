@@ -3,10 +3,10 @@
 | ID | Check | Evidence / expected result |
 | --- | --- | --- |
 | P1 | Release contract unit cases | Exact Cargo SemVer passes; malformed versions, non-tag push refs, and every tag not byte-equal to `v${version}` fail. |
-| P2 | Workflow dependency graph | Every job owning archive creation/upload, attestation, npm package assembly/upload, npm staging, or publish authority transitively depends on the contract job; release jobs have timeouts and concurrency. |
+| P2 | Workflow dependency and authority graph | Every job owning archive creation/upload, attestation, npm package assembly/upload, npm staging, or publish authority transitively depends on the contract job and has an explicit tag-push guard; release jobs have timeouts and concurrency. |
 | P3 | Portable Linux build | Release matrix uses `x86_64-unknown-linux-musl`; final public-name binary has no ELF `NEEDED` entry, `PT_INTERP`/`INTERP` program header, or `GLIBC_*` symbol string. |
 | P4 | Older runtime smoke | The exact Linux artifact runs help/version and disposable-repository `init/status` smoke in digest-pinned Ubuntu 22.04 and Debian 12 x86_64 containers; the container root and artifact bind mount are read-only, with only disposable repository/state and bounded temporary storage writable. |
-| P5 | Pre-authority release integration | A `workflow_dispatch` branch rehearsal passes the release contract without claiming a tag; a simulated mismatched tag exits in `release-contract` before archive, attestation, npm-package, staging, or publish authority can run or emit an artifact. |
+| P5 | Hosted pre-authority pre-merge gate | Before merge, a hosted `workflow_dispatch` run on the exact branch head succeeds in `release-contract`; every archive/attestation/upload/npm packaging/staging/publish authority job is skipped, and the run emits no artifact or attestation. A simulated mismatched tag fails in `release-contract` before every authority job and emits no artifact or attestation. |
 | C1 | Global CLI contract | `help/-h/--help` and `version/-V/--version` succeed outside Git; unknown command is nonzero. All leave cwd and isolated state home byte-identical. |
 | D1 | Doctor output contract | Text and valid schema-version-1 JSON use only documented keys/enums; no absolute paths, raw errors, repository/branch/path/note content, or sentinel secrets. Both modes remain at or below 4096 bytes under oversized hostile fixtures and fail before emitting any over-limit representation. |
 | D2 | Doctor side effects | Fresh, initialized, corrupt-header, symlink, drifted integration/service, stale daemon, and isolated-home fixtures have identical before/after filesystem manifests. |
@@ -19,5 +19,5 @@
 | Q4 | Documentation truth | README, CONTRIBUTING, SECURITY, issue form, and distribution docs match doctor/version commands, portable Linux contract, supported prerelease policy, current gates, and provider limitations. |
 | R1 | Regression suite | fmt, locked check/test/clippy/release build, package/workflow/public-artifact scripts, `cargo audit --deny warnings`, and diff check pass. |
 | R2 | Architecture-invariant audit | No network runtime, telemetry, new sensitive persistence, raw AI metadata, implicit repair, unsupported provider enablement, or unbounded repository scan was added. |
-| R3 | Independent final review | Code/spec/security-performance reviewer and architect both issue explicit non-blocking verdicts for the same final head; fixes cause renewed review. |
+| R3 | Independent final review | Code/spec/security-performance and architecture review lanes both issue explicit non-blocking verdicts for the same final head; fixes cause renewed review. |
 | E1 | External boundary | No tag, npm dist-tag, signing, service enablement, foreign hook mutation, branch/ruleset mutation, or GA claim occurs during repository-local completion. |

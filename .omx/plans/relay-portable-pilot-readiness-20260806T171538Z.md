@@ -9,8 +9,12 @@
    containers before packaging.
 2. Bind every tag-triggered release to the exact Cargo package version and a
    valid SemVer tag before archive creation/upload, attestation, npm package
-   assembly/upload, npm staging, or publish authority. Preserve workflow-dispatch
-   rehearsal without pretending it is a tag release.
+   assembly/upload, npm staging, or publish authority. Before merge, run the
+   hosted workflow on the exact branch head with `workflow_dispatch`: the
+   release contract must succeed, every authority job must be skipped, and the
+   run must emit no archive, attestation, uploaded artifact, npm package, staged
+   package, or publication. A mismatched tag must fail the contract before any
+   authority job can run.
 3. Make help/version/unknown-command behavior global, deterministic, usable
    outside Git, and free of evidence-state mutation.
 4. Add `relay doctor [--json]` as a read-only, local, bounded diagnostic. It
@@ -62,7 +66,7 @@
 | Failure scenario | Early signal | Mitigation and test |
 | --- | --- | --- |
 | The musl artifact builds but fails at startup or file watching on older distributions. | Container smoke exits nonzero, or daemon lifecycle tests diverge from native builds. | Keep native test jobs; run the actual release binary in immutable Ubuntu 22.04 and Debian 12 images; require `--version`, help, and a disposable-repo `init/status` smoke. |
-| The release guard passes workflow-dispatch but a mismatched tag still reaches an archive job. | Static workflow dependency test finds archive without the contract dependency, or validator accepts `v0.2.0-rc.10` for Cargo rc.9. | Central Node validator with table-driven negative tests; make all downstream jobs depend on the contract job; test exact SemVer and ref-type cases. |
+| A branch rehearsal or mismatched tag reaches release authority. | The hosted branch run executes an archive/attestation/upload/npm authority job or emits an artifact, a dependency/guard test fails, or the validator accepts `v0.2.0-rc.10` for Cargo rc.9. | Use a central validator with table-driven negatives; require every authority job to depend on the contract and carry an explicit tag-push guard; require an exact-head hosted branch rehearsal before merge. |
 | Doctor leaks a path/secret or mutates missing/corrupt state while diagnosing it. | Fixture hashes or directory listings change; output contains fixture sentinel, home path, branch, filename, raw error, or control bytes. | Read-only path derivation and no `db()` calls; fixed allowlisted fields; before/after filesystem snapshots; hostile symlink/database/integration fixtures; byte/line caps. |
 | New CI hardening becomes flaky or locks out releases. | Timeouts, action-pin tests, or container pulls fail intermittently. | Pin runner versions and container digests; use bounded but realistic timeouts; keep workflow-dispatch rehearsal; do not mutate branch/tag rulesets in this plan. |
 | The scope expands into a new provider API before the pilot. | New schema, network listener, or integration state appears in the diff. | Architecture invariant audit rejects new data classes, network code, automatic provider launch, and stable context API additions. |
@@ -76,16 +80,20 @@
    `GITHUB_REF_NAME == v${CARGO_VERSION}` and `GITHUB_REF_TYPE == tag`.
 2. Put an early contract job in `release.yml`; make every job that owns archive
    creation/upload, attestation, npm package assembly/upload, npm staging, or
-   publish authority transitively depend on it. Add release concurrency and job
-   timeouts.
+   publish authority transitively depend on it and require an explicit
+   `push`-event plus tag-ref guard. On `workflow_dispatch` from a branch, only
+   pre-authority validation may run: `release-contract` succeeds, every
+   authority job is skipped, and the run emits no artifact or attestation. Add
+   release concurrency and job timeouts.
 3. Build the Linux matrix entry for `x86_64-unknown-linux-musl` on a versioned
    runner. Verify no ELF `NEEDED` entries, no `PT_INTERP`/`INTERP` program
    header, and no `GLIBC_*` strings, then run the exact artifact in digest-pinned
    Ubuntu 22.04 and Debian 12 containers. Keep the public asset/package name
    stable.
 4. Make workflow tests assert the dependency graph, portable target, runtime
-   smokes, each enumerated authoritative job class, tag/version negatives, and
-   full 40-hex SHA pins for every remote action reference.
+   smokes, explicit tag-push guards for each enumerated authoritative job class,
+   branch-dispatch skip/no-output behavior, tag/version negatives, and full
+   40-hex SHA pins for every remote action reference.
 
 ### G113 — global CLI and privacy-safe doctor
 
@@ -134,8 +142,8 @@
    scripts, public-artifact verification, plist/systemd validation where
    applicable, `cargo audit --deny warnings`, and `git diff --check`.
 2. Build and execute the musl artifact in the planned containers locally or in
-   an exact-head CI rehearsal; hashes and external runs supplement rather than
-   replace local tests.
+   exact-head CI; hashes and external runs supplement rather than replace local
+   tests.
 3. Run anti-slop cleanup, then re-run affected gates. Audit architecture
    invariants: local-only, no new sensitive persistence, no raw AI metadata,
    no automatic repair/provider launch, and bounded work.
@@ -144,8 +152,11 @@
    are explicitly non-blocking.
 5. Commit in atomic chunks, push a `codex/` branch, open a PR, and merge only
    after exact-head repository CI and CodeRabbit reach terminal non-blocking
-   verdicts. Refresh durable quality evidence after the merge snapshot is
-   known. Do not tag or publish a new RC in this goal.
+   verdicts and a hosted `workflow_dispatch` rehearsal on that exact branch
+   head proves `release-contract` succeeds, every archive/attestation/upload/npm
+   packaging/staging/publish authority job is skipped, and the run emits no
+   artifact or attestation. Refresh durable quality evidence after the merge
+   snapshot is known. Do not tag or publish a new RC in this goal.
 
 ## Expanded test plan
 
@@ -182,8 +193,11 @@
   artifact bind mount and container root are read-only while only disposable
   repository/state and bounded temporary storage are writable in digest-pinned
   Ubuntu 22.04 and Debian 12 containers.
-- `workflow_dispatch` rehearsal succeeds without claiming a tag; a simulated
-  mismatched tag fails before build/package jobs.
+- Before merge, a hosted `workflow_dispatch` rehearsal on the exact branch head
+  succeeds in `release-contract`; every archive/attestation/upload/npm
+  packaging/staging/publish authority job is skipped, and the run emits no
+  artifact or attestation. A simulated mismatched tag fails in
+  `release-contract` before every authority job.
 - Future owner-gated RC: GitHub assets, attestations, npm `next`, Homebrew
   formula, and supported-host clean installs must be re-observed before broad
   Linux readiness is closed.
@@ -207,7 +221,10 @@
   contract; Ubuntu 22.04 and Debian 12 execute the exact artifact successfully.
 - No job owning archive creation/upload, attestation, npm package
   assembly/upload, npm staging, or publish authority can run until the release
-  contract job passes. A mismatched/malformed tag is proven to fail.
+  contract job passes, and each is limited to tag-push authority. Before merge,
+  a hosted exact-head branch dispatch proves `release-contract` succeeds, all
+  authority jobs are skipped, and no artifact or attestation is emitted. A
+  mismatched/malformed tag is proven to fail before authority.
 - Global help/version work outside Git and produce no state. Unknown commands
   are nonzero and produce no state.
 - Doctor text and JSON use fixed fields, never emit raw paths/errors/secrets or
@@ -271,15 +288,15 @@ an owner release policy.
 
 ## Available-agent roster and execution staffing
 
-- Strict planning lanes: `architect` then `critic`, sequential and independent,
-  selected through `agent_type`.
+- Strict planning lanes: architecture then critical review, sequential and
+  independent.
 - Execution owner: Ultragoal leader, reasoning high, retains integration,
   commits, external-boundary decisions, and ledger authority.
 - Suggested bounded workers after consensus: one worker for release workflow
   and tests, one worker for doctor/CLI and tests. The leader owns docs/evidence
   and conflict-free integration. Workers must not revert concurrent changes.
-- Final lanes: independent `code-reviewer` for code/spec/security/performance
-  and `architect` for invariants. Material fixes require re-review.
+- Final lanes: independent code/spec/security/performance and architecture
+  reviews. Material fixes require re-review.
 - Team Decision Gate: use two bounded workers because G112 and G113 touch
   disjoint primary surfaces and parallelism materially reduces latency. Do not
   start a terminal/tmux team runtime; native subagents are sufficient.
@@ -295,33 +312,10 @@ an owner release policy.
 - `$ralph` is a fallback only if a single stubborn fix requires an iterative
   owner loop.
 
-## Consensus reviews
+## Consensus provenance
 
-### Architect (iteration 1): APPROVE
-
-The independent Architect approved the scope and sequencing at source snapshot
-`3bd67c5d3ed04bab389672389bf5ad542cb58a1f`. It confirmed that the confirmed
-Linux compatibility and broad tag authority are the root release problems,
-that musl plus real older-runtime execution is stronger than an older-glibc
-build, and that doctor must use read-only probes rather than `db()` or
-`database_path()`. Its steelman alternative was to prioritize provider-neutral
-context JSON for visible product value; it retained the plan because release
-truth and interpretable pilot diagnostics must precede a new API boundary.
-
-### Critic
-
-#### Critic (iteration 2): APPROVE
-
-The independent Critic approved the exact current planning artifacts at source
-snapshot `3bd67c5d3ed04bab389672389bf5ad542cb58a1f`. It found the G112-G115 scope,
-RALPLAN-DR alternatives and ADR, five-scenario pre-mortem, unit/integration/E2E
-and observability tests, available-agent roster, Team Decision Gate, owner-only
-boundaries, and final exact-head review path execution-ready. Its only
-non-blocking note is to resolve and record immutable Ubuntu/Debian image digests
-during implementation rather than leaving tag-only smoke references.
-
-### Consensus gate
-
-`RALPLAN_CONSENSUS_COMPLETE`: native role-selectable Architect and Critic lanes
-ran sequentially and independently; both approved. Implementation may now
-transition to Ultragoal.
+| Lane | Status | Iteration | Snapshot | Reason code |
+| --- | --- | ---: | --- | --- |
+| Architecture | `APPROVE` | 1 | `3bd67c5d3ed04bab389672389bf5ad542cb58a1f` | `SCOPE_SEQUENCE_ACCEPTED` |
+| Critical review | `APPROVE` | 2 | `3bd67c5d3ed04bab389672389bf5ad542cb58a1f` | `EXECUTION_READY` |
+| Consensus gate | `RALPLAN_CONSENSUS_COMPLETE` | 2 | `3bd67c5d3ed04bab389672389bf5ad542cb58a1f` | `REQUIRED_LANES_APPROVED` |
