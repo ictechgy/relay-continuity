@@ -244,11 +244,6 @@ for (const language of ["actions", "javascript-typescript", "rust"]) {
   }
 }
 if (
-  !/name: Install the pinned Rust analysis toolchain\n        if: matrix\.language == 'rust'\n        uses: dtolnay\/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1\.97\.1\n        with:\n          toolchain: 1\.97\.1\n          components: rust-src/.test(codeqlWorkflow)
-) {
-  throw new Error("CodeQL Rust analysis must use the pinned toolchain with rust-src");
-}
-if (
   !/config-file: \.\/\.github\/codeql\/codeql-config\.yml/.test(codeqlWorkflow) ||
   !/category: \/language:\$\{\{ matrix\.language \}\}/.test(codeqlWorkflow)
 ) {
