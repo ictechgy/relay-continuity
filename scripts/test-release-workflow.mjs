@@ -232,7 +232,7 @@ if (/\bNPM_TOKEN\b/.test(workflow)) {
 }
 
 if (
-  !/permissions:\n  contents: read[\s\S]*analyze:\n    name: Analyze \(\$\{\{ matrix\.language \}\}\)[\s\S]*permissions:\n      contents: read\n      packages: read\n      security-events: write/.test(
+  !/permissions:\n  contents: read[\s\S]*analyze:\n    name: Analyze \(\$\{\{ matrix\.language \}\}\)[\s\S]*permissions:\n      contents: read\n      security-events: write/.test(
     codeqlWorkflow
   )
 ) {
