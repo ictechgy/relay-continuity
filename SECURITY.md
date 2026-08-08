@@ -43,11 +43,10 @@ quarantines, migrates, compacts, installs, enables, or removes state. Its output
 is an allowlist of fixed states and reason codes; it does not include raw
 filesystem/SQLite errors or workspace metadata.
 
-Repository CodeQL scans keep local-source threat modeling enabled for product
-code, release tooling, and workflows. The black-box `tests/` harness is excluded
-from static path-injection results because it intentionally drives hostile
-temporary paths; those tests remain mandatory in the compiler, Clippy, and CI
-gates.
+Repository CodeQL scans cover product code, release tooling, and workflows. The
+black-box `tests/` harness is excluded from static path-injection results because
+it intentionally drives hostile temporary paths; those tests remain mandatory
+in the compiler, Clippy, and CI gates.
 
 Tagged native builds receive GitHub artifact attestations scoped to the exact
 repository, release workflow, Git ref, and commit. npm packaging verifies those

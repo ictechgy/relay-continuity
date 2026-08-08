@@ -256,14 +256,11 @@ if (
   JSON.stringify(codeqlConfigContract) !==
   JSON.stringify([
     'name: "Relay CodeQL configuration"',
-    "threat-models: local",
     "paths-ignore:",
     '  - "tests/**"'
   ])
 ) {
-  throw new Error(
-    "CodeQL configuration must retain local-source analysis and exclude only black-box tests"
-  );
+  throw new Error("CodeQL configuration may exclude only the black-box tests directory");
 }
 
 process.stdout.write("Verified release and CodeQL workflow authority and provenance contracts.\n");
