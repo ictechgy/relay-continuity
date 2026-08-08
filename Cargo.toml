@@ -12,5 +12,5 @@ path = "src/main.rs"
 [dependencies]
 libc = "0.2"
 notify = "8.1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.10"
