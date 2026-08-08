@@ -104,7 +104,7 @@ trees. Watcher registration failure falls back to polling. Transient Git or
 invalid `.relayignore` state pauses capture and reports a fixed privacy-safe
 degradation reason instead of terminating the daemon; capture resumes after
 the repository control state is valid again. `relay daemon stop` and
-`relay daemon status` manage and inspect that process. Stop is a nonce-checked
+`relay daemon status` manage and inspect that process. Stop is an instance-ID-checked
 local request; Relay never sends a signal to a PID from its state file. `relay
 status` always says whether generic capture is active and keeps semantic
 context explicitly `unknown` without an adapter.
@@ -207,7 +207,7 @@ service directory. Enable that template once with the platform's service
 manager; Relay intentionally does not enable a background process without that
 separate user action. `relay integration service status <manager>` detects a
 missing or modified template, and `uninstall <manager> --apply` removes only a
-byte-identical Relay template. `relay daemon stop` is a nonce-checked controlled
+byte-identical Relay template. `relay daemon stop` is an instance-ID-checked controlled
 stop; the templates restart only after unsuccessful exits.
 
 ### Codex

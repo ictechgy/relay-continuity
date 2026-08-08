@@ -1237,14 +1237,14 @@ fn service_run(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
     let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
     let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
-    let nonce = format!(
+    let instance_id = format!(
         "service-{}",
         &hash(format!("{}:{}", root.display(), std::process::id()).as_bytes())[..16]
     );
     let mut pid_file = create_new_managed_file(root, &[".relay"], "daemon.pid")?;
-    write!(pid_file, "{}\n{}", std::process::id(), nonce)?;
+    write!(pid_file, "{}\n{}", std::process::id(), instance_id)?;
     pid_file.sync_all()?;
-    run_daemon(root, &c, &nonce)
+    run_daemon(root, &c, &instance_id)
 }
 fn integration_command(
     root: &Path,
@@ -2077,34 +2077,36 @@ fn daemon_reconcile(
     root: &Path,
     c: &Connection,
     ignore_rules: &mut IgnoreRules,
-    nonce: &str,
+    instance_id: &str,
     polling_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if ignore_rules.refresh(root).is_err() {
-        write_daemon_degraded(root, nonce, "repository-control-unavailable")?;
+        write_daemon_degraded(root, instance_id, "repository-control-unavailable")?;
         return Ok(());
     }
     match observe_with_rules(root, c, ignore_rules) {
         Ok(_) => {
             if polling_only {
-                write_daemon_degraded(root, nonce, "watcher-polling")
+                write_daemon_degraded(root, instance_id, "watcher-polling")
             } else {
                 clear_daemon_degraded(root)
             }
         }
         Err(error) if writer_busy(error.as_ref()) => Ok(()),
         Err(error) if git_unavailable(error.as_ref()) => {
-            write_daemon_degraded(root, nonce, "git-unavailable")
+            write_daemon_degraded(root, instance_id, "git-unavailable")
         }
         Err(error) => Err(error),
     }
 }
 const DAEMON_MARKER_FILE_LIMIT_BYTES: u64 = 256;
-const DAEMON_NONCE_MAX_BYTES: usize = 128;
-fn valid_daemon_nonce(nonce: &str) -> bool {
-    !nonce.is_empty()
-        && nonce.len() <= DAEMON_NONCE_MAX_BYTES
-        && nonce
+const DAEMON_INSTANCE_ID_MAX_BYTES: usize = 128;
+// This same-user generation identifier only correlates daemon marker files. It
+// is not a credential, cryptographic nonce, or authorization boundary.
+fn valid_daemon_instance_id(instance_id: &str) -> bool {
+    !instance_id.is_empty()
+        && instance_id.len() <= DAEMON_INSTANCE_ID_MAX_BYTES
+        && instance_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
@@ -2112,11 +2114,11 @@ fn parse_daemon_identity(bytes: &[u8]) -> Option<(u32, String)> {
     let text = std::str::from_utf8(bytes).ok()?;
     let mut lines = text.lines();
     let pid = lines.next()?.parse().ok()?;
-    let nonce = lines.next()?;
-    if lines.next().is_some() || !valid_daemon_nonce(nonce) {
+    let instance_id = lines.next()?;
+    if lines.next().is_some() || !valid_daemon_instance_id(instance_id) {
         return None;
     }
-    Some((pid, nonce.to_owned()))
+    Some((pid, instance_id.to_owned()))
 }
 fn read_daemon_identity(root: &Path) -> Option<(u32, String)> {
     let bytes = read_managed_file_bounded(
@@ -2130,10 +2132,10 @@ fn read_daemon_identity(root: &Path) -> Option<(u32, String)> {
 }
 fn write_daemon_degraded(
     root: &Path,
-    nonce: &str,
+    instance_id: &str,
     reason: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !valid_daemon_nonce(nonce)
+    if !valid_daemon_instance_id(instance_id)
         || !matches!(
             reason,
             "git-unavailable" | "repository-control-unavailable" | "watcher-polling"
@@ -2145,7 +2147,7 @@ fn write_daemon_degraded(
         root,
         &[".relay"],
         "daemon.degraded",
-        format!("{nonce}\n{reason}\n").as_bytes(),
+        format!("{instance_id}\n{reason}\n").as_bytes(),
     )
 }
 fn clear_daemon_degraded(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -2155,7 +2157,7 @@ fn clear_daemon_degraded(root: &Path) -> Result<(), Box<dyn std::error::Error>> 
         Err(error) => Err(error),
     }
 }
-fn daemon_degraded_reason(root: &Path, nonce: &str) -> Result<Option<&'static str>, ()> {
+fn daemon_degraded_reason(root: &Path, instance_id: &str) -> Result<Option<&'static str>, ()> {
     let bytes = match read_managed_file_bounded(
         root,
         &[".relay"],
@@ -2168,7 +2170,7 @@ fn daemon_degraded_reason(root: &Path, nonce: &str) -> Result<Option<&'static st
     };
     let text = String::from_utf8(bytes).map_err(|_| ())?;
     let mut lines = text.lines();
-    if lines.next() != Some(nonce) {
+    if lines.next() != Some(instance_id) {
         return Err(());
     }
     let reason = match lines.next() {
@@ -2201,8 +2203,8 @@ fn process_active(pid: u32) -> bool {
         .map(|status| status.success())
         .unwrap_or(false)
 }
-fn active_daemon_nonce(root: &Path) -> Option<String> {
-    let (pid, nonce) = read_daemon_identity(root)?;
+fn active_daemon_instance_id(root: &Path) -> Option<String> {
+    let (pid, instance_id) = read_daemon_identity(root)?;
     if process_active(pid)
         && read_managed_file_bounded(
             root,
@@ -2212,21 +2214,21 @@ fn active_daemon_nonce(root: &Path) -> Option<String> {
         )
         .ok()
         .as_deref()
-            == Some(nonce.as_bytes())
+            == Some(instance_id.as_bytes())
     {
-        Some(nonce)
+        Some(instance_id)
     } else {
         None
     }
 }
 fn daemon_active(root: &Path) -> bool {
-    active_daemon_nonce(root).is_some()
+    active_daemon_instance_id(root).is_some()
 }
 fn daemon_state(root: &Path) -> String {
-    let Some(nonce) = active_daemon_nonce(root) else {
+    let Some(instance_id) = active_daemon_instance_id(root) else {
         return "unavailable".to_owned();
     };
-    match daemon_degraded_reason(root, &nonce) {
+    match daemon_degraded_reason(root, &instance_id) {
         Ok(Some(reason)) => format!("degraded ({reason})"),
         Ok(None) => "active".to_owned(),
         Err(()) => "unavailable".to_owned(),
@@ -2240,7 +2242,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
     let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
     let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
-    let nonce = hash(
+    let instance_id = hash(
         format!(
             "{}:{:?}",
             root.display(),
@@ -2252,7 +2254,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut pid_file = create_new_managed_file(root, &[".relay"], "daemon.pid")?;
     let child = match Command::new(env::current_exe()?)
         .args(["daemon", "run"])
-        .arg(&nonce)
+        .arg(&instance_id)
         .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -2265,7 +2267,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             return Err(error.into());
         }
     };
-    write!(pid_file, "{}\n{}", child.id(), nonce)?;
+    write!(pid_file, "{}\n{}", child.id(), instance_id)?;
     pid_file.sync_all()?;
     for _ in 0..150 {
         if daemon_active(root) {
@@ -2274,7 +2276,7 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    let _ = atomic_replace_managed(root, &[".relay"], "daemon.stop", nonce.as_bytes());
+    let _ = atomic_replace_managed(root, &[".relay"], "daemon.stop", instance_id.as_bytes());
     let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
     let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
     let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
@@ -2284,13 +2286,13 @@ fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if read_daemon_identity(root).is_none() {
         return Err("Relay daemon is not running".into());
     }
-    let Some(nonce) = active_daemon_nonce(root) else {
+    let Some(instance_id) = active_daemon_instance_id(root) else {
         let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
         let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
         let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
         return Err("Relay daemon state was stale; no process was stopped".into());
     };
-    atomic_replace_managed(root, &[".relay"], "daemon.stop", nonce.as_bytes())?;
+    atomic_replace_managed(root, &[".relay"], "daemon.stop", instance_id.as_bytes())?;
     for _ in 0..75 {
         if !daemon_active(root) {
             let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
@@ -2316,9 +2318,13 @@ fn event_is_relevant(root: &Path, event: &Event, ignore_rules: &IgnoreRules) -> 
         !ignore_rules.ignores(&relative.to_string_lossy())
     })
 }
-fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if !valid_daemon_nonce(nonce) {
-        return Err("Relay rejected an invalid managed daemon nonce".into());
+fn run_daemon(
+    root: &Path,
+    c: &Connection,
+    instance_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !valid_daemon_instance_id(instance_id) {
+        return Err("Relay rejected an invalid managed daemon instance ID".into());
     }
     let mut ignore_rules = IgnoreRules::default();
     let (tx, rx) = channel();
@@ -2331,8 +2337,8 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     };
     let mut polling_only = watcher.is_none();
     let _watcher_guard = watcher;
-    atomic_replace_managed(root, &[".relay"], "daemon.ready", nonce.as_bytes())?;
-    daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+    atomic_replace_managed(root, &[".relay"], "daemon.ready", instance_id.as_bytes())?;
+    daemon_reconcile(root, c, &mut ignore_rules, instance_id, polling_only)?;
     let mut last_reconcile = Instant::now();
     let mut pending: Option<Instant> = None;
     loop {
@@ -2344,7 +2350,7 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
         )
         .ok()
         .as_deref()
-            == Some(nonce.as_bytes())
+            == Some(instance_id.as_bytes())
         {
             let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
             let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
@@ -2357,7 +2363,7 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
         let received = rx.recv_timeout(timeout);
         if matches!(received, Ok(Err(_))) {
             polling_only = true;
-            write_daemon_degraded(root, nonce, "watcher-polling")?;
+            write_daemon_degraded(root, instance_id, "watcher-polling")?;
         }
         match received {
             Ok(Ok(event))
@@ -2371,31 +2377,31 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
                     .is_some_and(|changed| changed.elapsed() >= Duration::from_millis(750)) =>
             {
                 pending = None;
-                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+                daemon_reconcile(root, c, &mut ignore_rules, instance_id, polling_only)?;
                 last_reconcile = Instant::now();
             }
             Ok(Ok(_)) | Ok(Err(_))
                 if pending.is_none() && last_reconcile.elapsed() >= Duration::from_secs(1) =>
             {
-                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+                daemon_reconcile(root, c, &mut ignore_rules, instance_id, polling_only)?;
                 last_reconcile = Instant::now();
             }
             Ok(Ok(_)) | Ok(Err(_)) => {}
             Err(RecvTimeoutError::Timeout) if pending.take().is_some() => {
-                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+                daemon_reconcile(root, c, &mut ignore_rules, instance_id, polling_only)?;
                 last_reconcile = Instant::now();
             }
             Err(RecvTimeoutError::Timeout) => {
                 if last_reconcile.elapsed() >= Duration::from_secs(1) {
-                    daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+                    daemon_reconcile(root, c, &mut ignore_rules, instance_id, polling_only)?;
                     last_reconcile = Instant::now();
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 polling_only = true;
-                write_daemon_degraded(root, nonce, "watcher-polling")?;
+                write_daemon_degraded(root, instance_id, "watcher-polling")?;
                 thread::sleep(Duration::from_millis(500));
-                daemon_reconcile(root, c, &mut ignore_rules, nonce, polling_only)?;
+                daemon_reconcile(root, c, &mut ignore_rules, instance_id, polling_only)?;
                 last_reconcile = Instant::now();
             }
         }
@@ -3165,7 +3171,7 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
         }
         Ok(bytes) => bytes,
     };
-    let Some((pid, nonce)) = parse_daemon_identity(&pid_bytes) else {
+    let Some((pid, instance_id)) = parse_daemon_identity(&pid_bytes) else {
         return DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Failure,
@@ -3200,7 +3206,7 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
             );
         }
         Ok(bytes) => match bytes.as_slice() {
-            ready if ready == nonce.as_bytes() => {}
+            ready if ready == instance_id.as_bytes() => {}
             _ => {
                 return DoctorCheck::new(
                     DoctorCheckName::Capture,
@@ -3241,19 +3247,19 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
             DoctorCheckState::Pass,
             DoctorReason::CaptureActive,
         ),
-        Some(value) if value == format!("{nonce}\ngit-unavailable\n") => DoctorCheck::new(
+        Some(value) if value == format!("{instance_id}\ngit-unavailable\n") => DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Warning,
             DoctorReason::CaptureDegradedGit,
         ),
-        Some(value) if value == format!("{nonce}\nrepository-control-unavailable\n") => {
+        Some(value) if value == format!("{instance_id}\nrepository-control-unavailable\n") => {
             DoctorCheck::new(
                 DoctorCheckName::Capture,
                 DoctorCheckState::Warning,
                 DoctorReason::CaptureDegradedRepository,
             )
         }
-        Some(value) if value == format!("{nonce}\nwatcher-polling\n") => DoctorCheck::new(
+        Some(value) if value == format!("{instance_id}\nwatcher-polling\n") => DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Warning,
             DoctorReason::CaptureDegradedPolling,
@@ -3541,7 +3547,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some("run") => run_daemon(
                 &root,
                 &c,
-                &a.next().ok_or("Relay daemon requires a managed nonce")?,
+                &a.next()
+                    .ok_or("Relay daemon requires a managed instance ID")?,
             )?,
             _ => return Err("usage: relay daemon <start|stop|status>".into()),
         },
