@@ -13,10 +13,11 @@ concurrency:
 
 jobs:
   test:
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-15, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,6 +41,21 @@ jobs:
           cp target/release/relay "$executable"
           "$executable" integration service plan systemd > "$fixture/relay.service"
           systemd-analyze verify "$fixture/relay.service"
+      - name: Verify adversarial launchd service rendering
+        if: runner.os == 'macOS'
+        run: |
+          fixture="$(mktemp -d)"
+          executable="$fixture/relay \$HOME/%h/한글 & <plist>"
+          mkdir -p "$(dirname "$executable")"
+          cp target/release/relay "$executable"
+          "$executable" integration service plan launchd > "$fixture/relay.plist"
+          plutil -lint "$fixture/relay.plist"
+          rendered="$(plutil -extract ProgramArguments.0 raw -o - "$fixture/relay.plist")"
+          test "$rendered" = "$executable"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Validate distribution scripts
         run: |
           node --check packages/relay/bin/relay.js
@@ -50,15 +66,18 @@ jobs:
           node --check scripts/verify-public-artifacts.mjs
           node --check scripts/test-public-artifacts.mjs
           node --check scripts/test-relay-wrapper.mjs
+          node --check scripts/verify-release-contract.mjs
+          node --check scripts/test-release-contract.mjs
           node --check scripts/test-release-workflow.mjs
           node scripts/verify-npm-packages.mjs --templates
           node scripts/test-package-npm.mjs
           node scripts/verify-public-artifacts.mjs
           node scripts/test-public-artifacts.mjs
           node scripts/test-relay-wrapper.mjs
+          node scripts/test-release-contract.mjs
           node scripts/test-release-workflow.mjs
           node --check scripts/render-homebrew-formula.mjs
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          version="$(node --input-type=module -e 'import { readCargoPackageVersion } from "./scripts/verify-release-contract.mjs"; process.stdout.write(await readCargoPackageVersion("Cargo.toml"));')"
           test -n "$version"
           node scripts/render-homebrew-formula.mjs \
             --version "$version" \
@@ -69,7 +88,8 @@ jobs:
 
   audit:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

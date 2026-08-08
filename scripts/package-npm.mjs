@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { cp, chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { basename, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -61,10 +62,11 @@ async function copyPackage(template, destination, version) {
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-function npmPack(directory, output) {
+function npmPack(directory, output, cache) {
   const result = spawnSync("npm", ["pack", "--ignore-scripts", "--pack-destination", output], {
     cwd: directory,
-    encoding: "utf8"
+    encoding: "utf8",
+    env: { ...process.env, npm_config_cache: cache }
   });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout);
   return result.stdout.trim().split(/\r?\n/).at(-1);
@@ -104,20 +106,25 @@ await copyPackage(join(root, "packages", "relay"), wrapperDirectory, arguments_.
 
 const packed = [];
 const publishManifest = [];
-for (const directory of [...platformPackages.map(([name]) => name), "relay"]) {
-  const filename = npmPack(join(packages, directory), tarballs);
-  packed.push(basename(filename));
-  const manifest = JSON.parse(await readFile(join(packages, directory, "package.json"), "utf8"));
-  const tarball = basename(filename);
-  const entry = {
-    name: manifest.name,
-    tarball,
-    version: manifest.version,
-    sha256: await sha256(join(tarballs, tarball))
-  };
-  const binarySha256 = binaryDigests.get(directory);
-  if (binarySha256) entry.binarySha256 = binarySha256;
-  publishManifest.push(entry);
+const npmCache = await mkdtemp(join(tmpdir(), "relay-npm-pack-cache-"));
+try {
+  for (const directory of [...platformPackages.map(([name]) => name), "relay"]) {
+    const filename = npmPack(join(packages, directory), tarballs, npmCache);
+    packed.push(basename(filename));
+    const manifest = JSON.parse(await readFile(join(packages, directory, "package.json"), "utf8"));
+    const tarball = basename(filename);
+    const entry = {
+      name: manifest.name,
+      tarball,
+      version: manifest.version,
+      sha256: await sha256(join(tarballs, tarball))
+    };
+    const binarySha256 = binaryDigests.get(directory);
+    if (binarySha256) entry.binarySha256 = binarySha256;
+    publishManifest.push(entry);
+  }
+} finally {
+  await rm(npmCache, { recursive: true, force: true });
 }
 await writeFile(join(output, "publish-order.txt"), `${packed.join("\n")}\n`);
 await writeFile(join(output, "publish-manifest.json"), `${JSON.stringify({ version: arguments_.version, packages: publishManifest }, null, 2)}\n`);

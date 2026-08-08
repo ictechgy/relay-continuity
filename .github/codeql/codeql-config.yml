@@ -1,0 +1,6 @@
+name: "Relay CodeQL configuration"
+
+# Black-box integration tests intentionally exercise attacker-controlled temporary
+# paths. Keep production Rust, release tooling, and GitHub workflows in scope.
+paths-ignore:
+  - "tests/**"
