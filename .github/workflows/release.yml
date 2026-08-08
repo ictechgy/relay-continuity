@@ -22,6 +22,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - name: Verify Cargo version and release ref
         id: verify
         env:
@@ -73,12 +77,16 @@ jobs:
       - run: cargo test --locked
       - run: cargo build --release --locked --target "${{ matrix.target }}"
       - run: mv "target/${{ matrix.target }}/release/relay" "relay-${{ matrix.asset }}"
-      - name: Reject dynamic or GLIBC-linked Linux artifacts
+      - name: Reject dynamic, interpreted, or GLIBC-linked Linux artifacts
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: |
           file relay-linux-x86_64 | grep -E 'x86-64.*static' >/dev/null
           if readelf -d relay-linux-x86_64 | grep '(NEEDED)' >/dev/null; then
             echo "Linux release artifact has a dynamic dependency" >&2
+            exit 1
+          fi
+          if readelf -l relay-linux-x86_64 | grep -E '(^|[[:space:]])(PT_)?INTERP([[:space:]]|$)' >/dev/null; then
+            echo "Linux release artifact has an ELF interpreter segment" >&2
             exit 1
           fi
           if strings relay-linux-x86_64 | grep -E 'GLIBC_[0-9]' >/dev/null; then

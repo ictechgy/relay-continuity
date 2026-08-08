@@ -92,8 +92,13 @@ try {
     "mixed-quote duplicate package version"
   );
 
-  await writeFile(cargoPath, cargo(`1.2.3-${"a".repeat(257)}`));
-  expectStatus(run(cargoPath, "push", "tag", "v1.2.3-oversized"), 1, "oversized version");
+  const oversizedVersion = `1.2.3-${"a".repeat(257)}`;
+  await writeFile(cargoPath, cargo(oversizedVersion));
+  expectStatus(
+    run(cargoPath, "push", "tag", `v${oversizedVersion}`),
+    1,
+    "oversized version"
+  );
 
   await writeFile(cargoPath, `${cargo("1.2.3")}#${"x".repeat(1024 * 1024)}`);
   expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "oversized Cargo.toml");

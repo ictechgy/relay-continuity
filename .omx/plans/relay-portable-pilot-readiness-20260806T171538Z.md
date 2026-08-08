@@ -4,18 +4,21 @@
 
 1. Make the Linux x64 artifact truthfully portable across the prerelease
    support floor. Build `x86_64-unknown-linux-musl`, fail if it retains a dynamic
-   ELF dependency or GLIBC symbol contract, and execute the artifact in pinned
-   Ubuntu 22.04 and Debian 12 containers before packaging.
+   ELF dependency, a `PT_INTERP`/`INTERP` program header, or a GLIBC symbol
+   contract, and execute the artifact in pinned Ubuntu 22.04 and Debian 12
+   containers before packaging.
 2. Bind every tag-triggered release to the exact Cargo package version and a
-   valid SemVer tag before archives, attestations, npm packaging, or staging.
-   Preserve workflow-dispatch rehearsal without pretending it is a tag release.
+   valid SemVer tag before archive creation/upload, attestation, npm package
+   assembly/upload, npm staging, or publish authority. Preserve workflow-dispatch
+   rehearsal without pretending it is a tag release.
 3. Make help/version/unknown-command behavior global, deterministic, usable
    outside Git, and free of evidence-state mutation.
 4. Add `relay doctor [--json]` as a read-only, local, bounded diagnostic. It
    reports only fixed states/reason codes for repository, evidence storage,
    daemon, service template, and provider integration. It must not create,
    quarantine, migrate, compact, or repair anything and must not expose paths,
-   raw OS/SQLite errors, repository names, or secrets.
+   raw OS/SQLite errors, repository names, or secrets; text and JSON output must
+   never exceed 4096 bytes.
 5. Expand adversarial AI-facing-card tests and CI/review coverage. Add current
    dependency update configuration and repair stale documentation/evidence.
 6. Do not publish a new tag, change npm dist-tags, enable a service, mutate a
@@ -71,15 +74,18 @@
 1. Add a pure/testable release-contract script that reads the Cargo package
    version, validates SemVer, and on tag pushes requires
    `GITHUB_REF_NAME == v${CARGO_VERSION}` and `GITHUB_REF_TYPE == tag`.
-2. Put an early contract job in `release.yml`; make archive and all package
-   jobs transitively depend on it. Add release concurrency and job timeouts.
+2. Put an early contract job in `release.yml`; make every job that owns archive
+   creation/upload, attestation, npm package assembly/upload, npm staging, or
+   publish authority transitively depend on it. Add release concurrency and job
+   timeouts.
 3. Build the Linux matrix entry for `x86_64-unknown-linux-musl` on a versioned
-   runner. Verify no ELF `NEEDED` entries or `GLIBC_*` strings and run the exact
-   artifact in digest-pinned Ubuntu 22.04 and Debian 12 containers. Keep the
-   public asset/package name stable.
+   runner. Verify no ELF `NEEDED` entries, no `PT_INTERP`/`INTERP` program
+   header, and no `GLIBC_*` strings, then run the exact artifact in digest-pinned
+   Ubuntu 22.04 and Debian 12 containers. Keep the public asset/package name
+   stable.
 4. Make workflow tests assert the dependency graph, portable target, runtime
-   smokes, tag/version negatives, and full 40-hex SHA pins for every remote
-   action reference.
+   smokes, each enumerated authoritative job class, tag/version negatives, and
+   full 40-hex SHA pins for every remote action reference.
 
 ### G113 — global CLI and privacy-safe doctor
 
@@ -93,19 +99,24 @@
    provider-controlled text. Cap output and reject unknown doctor flags.
 4. Use presence/header-only DB checks, no-follow managed reads, existing
    daemon/integration drift classification, and service-template comparison.
-   Return zero only when the repository is present and no fixed component is
-   broken/drifted/unsafe; absent optional components remain explicit, not
-   silently healthy.
+   Return zero only when every emitted check passes. Unknown or indeterminate
+   required state and broken/drifted/unsafe state are failures with exit 1;
+   degraded state is a warning with exit 1. An absent optional integration,
+   capture daemon, or user service remains an explicit pass reason and does not
+   alone change an otherwise healthy report from exit 0.
 5. Add outside-Git, fresh-repo, initialized, corrupted-header, symlink,
-   integration-drift, isolated-home, JSON-parse, hostile-path, and no-mutation
-   tests.
+   integration-drift, isolated-home, JSON-parse, hostile-path, degraded,
+   indeterminate-required-state, optional-absence, and no-mutation tests. Exercise
+   oversized hostile fixtures in both text and JSON modes and fail before
+   emitting output beyond the fixed 4096-byte bound.
 
 ### G114 — hostile-context, CI, review, and documentation hardening
 
 1. Add adversarial AI-card conformance fixtures covering control characters,
    newlines, ANSI, Unicode direction/zero-width characters, long names, secret
-   sentinels, and many dirty paths. Assert the automatic card exposes only
-   fixed prose, hashes, counts, and a strict word/byte budget.
+   sentinels, hostile repository names, and many dirty paths. Assert the
+   automatic card exposes only fixed prose, hashes, counts, and a strict
+   word/byte budget.
 2. Pin normal CI runner labels, add job timeouts, validate generated launchd
    plist output on macOS, and keep systemd validation on Linux.
 3. Expand CodeRabbit path filters to workflows, scripts, packages, docs,
@@ -143,10 +154,11 @@
 - SemVer parser accepts the Cargo version and rejects leading/trailing text,
   malformed prereleases, missing components, and non-exact tag prefixes.
 - Doctor status enums and JSON escaping are deterministic and exhaustively
-  allowlisted; unknown flags fail.
+  allowlisted; unknown flags fail; text and JSON rendering cannot emit more than
+  4096 bytes.
 - State-home calculation performs no create/chmod operation.
-- AI card rejects or omits all hostile repository strings and remains under the
-  declared byte/word bounds.
+- AI card rejects or omits hostile repository names, branch names, annotations,
+  and paths and remains under the declared byte/word bounds.
 - Every workflow `uses:` reference is a full commit SHA and expected known
   actions retain their audited pins/comments.
 
@@ -154,16 +166,21 @@
 
 - Global help/version work outside Git with no filesystem delta. Unknown
   commands fail with no state-home or repository mutation.
-- Doctor fresh/healthy/drifted/broken/unsafe fixtures produce parseable,
-  redacted, stable results with identical before/after filesystem manifests.
+- Doctor fresh/healthy/degraded/drifted/broken/unsafe/indeterminate fixtures and
+  absent optional-component fixtures produce the specified exit codes plus
+  parseable, redacted, stable results with identical before/after filesystem
+  manifests. Oversized hostile fixtures exercise the 4096-byte text and JSON
+  limit and fail before over-limit output is emitted.
 - Existing integration, daemon, compaction, ignore, writer-lock, and npm
   packaging tests remain green.
 - Generated systemd and launchd templates validate on their native CI hosts.
 
 ### E2E/release
 
-- The release Linux binary is built for musl, has no dynamic ELF dependency or
-  GLIBC symbol requirement, and runs from read-only mounts in digest-pinned
+- The release Linux binary is built for musl, has no dynamic ELF dependency,
+  `PT_INTERP`/`INTERP` program header, or GLIBC symbol requirement. Its exact
+  artifact bind mount and container root are read-only while only disposable
+  repository/state and bounded temporary storage are writable in digest-pinned
   Ubuntu 22.04 and Debian 12 containers.
 - `workflow_dispatch` rehearsal succeeds without claiming a tag; a simulated
   mismatched tag fails before build/package jobs.
@@ -184,17 +201,21 @@
 ## Acceptance criteria
 
 - Public Linux x64 workflow builds `x86_64-unknown-linux-musl`; static checks
-  find neither dynamic dependencies nor GLIBC contracts; Ubuntu 22.04 and
-  Debian 12 execute the exact artifact successfully.
-- No archive, attestation, package, or npm-stage job can run until the release
+  find no dynamic dependencies, `PT_INTERP`/`INTERP` program header, or GLIBC
+  contract; Ubuntu 22.04 and Debian 12 execute the exact artifact successfully.
+- No job owning archive creation/upload, attestation, npm package
+  assembly/upload, npm staging, or publish authority can run until the release
   contract job passes. A mismatched/malformed tag is proven to fail.
 - Global help/version work outside Git and produce no state. Unknown commands
   are nonzero and produce no state.
-- Doctor text and JSON use fixed fields, never emit raw paths/errors/secrets,
-  never create or alter managed/database/service/hook state, and distinguish
-  absent, healthy, degraded, drifted, broken, unsafe, and unknown as relevant.
-- Hostile branch/path/note fixtures cannot reach AI integration output; output
-  remains bounded and deterministic.
+- Doctor text and JSON use fixed fields, never emit raw paths/errors/secrets or
+  more than 4096 bytes, never create or alter managed/database/service/hook
+  state, and distinguish absent, healthy, degraded, drifted, broken, unsafe,
+  and unknown as relevant. Unknown required state, degraded state, and all
+  warnings/failures exit 1; explicit absent optional components alone permit
+  exit 0.
+- Hostile repository-name/branch/path/note fixtures cannot reach AI integration
+  output; output remains bounded and deterministic.
 - CI/review/dependency configuration and documentation match the actual gates
   and current prerelease contract.
 - All local gates and exact-head independent reviews are non-blocking. External

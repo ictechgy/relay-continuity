@@ -25,6 +25,55 @@ function jobBlock(source, name) {
   return lines.slice(start, end).join("\n");
 }
 
+function mappingEntries(source, header) {
+  const lines = source.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === header);
+  if (start < 0) throw new Error(`workflow has no ${header.trim()} mapping`);
+  const indentation = header.length - header.trimStart().length;
+  const entries = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || line.trimStart().startsWith("#")) continue;
+    const lineIndentation = line.length - line.trimStart().length;
+    if (lineIndentation <= indentation) break;
+    entries.push(line);
+  }
+  return entries;
+}
+
+function declaredJobNeeds(source, name) {
+  const job = jobBlock(source, name);
+  const match = job.match(/^    needs:\s*(.+)$/m);
+  if (!match) return [];
+  const value = match[1].trim();
+  const needs = value.startsWith("[") && value.endsWith("]")
+    ? value.slice(1, -1).split(",").map((entry) => entry.trim())
+    : [value];
+  if (needs.some((entry) => !/^[A-Za-z0-9_-]+$/.test(entry))) {
+    throw new Error(`${name} job has an unparsed needs contract`);
+  }
+  return needs;
+}
+
+function transitivelyNeeds(source, name, required, visiting = new Set()) {
+  if (name === required) return true;
+  if (visiting.has(name)) throw new Error(`release workflow has a needs cycle at ${name}`);
+  const nextVisiting = new Set(visiting).add(name);
+  return declaredJobNeeds(source, name).some((dependency) =>
+    transitivelyNeeds(source, dependency, required, nextVisiting)
+  );
+}
+
+function verifyPinnedNode24(source, name) {
+  const job = jobBlock(source, name);
+  const matches = job.match(
+    /- uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n(?:          registry-url: https:\/\/registry\.npmjs\.org\n)?          package-manager-cache: false/g
+  ) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(`${name} job must select Node 24 with the reviewed immutable setup-node pin`);
+  }
+}
+
 function verifyRemoteActionPin(value, location) {
   if (value.startsWith("./")) return;
   if (value.startsWith("docker://")) {
@@ -131,6 +180,9 @@ for (const [action, approved] of githubActionPins) {
     throw new Error(`workflows contain an unparsed ${action} reference`);
   }
 }
+verifyPinnedNode24(ciWorkflow, "test");
+verifyPinnedNode24(workflow, "release-contract");
+verifyPinnedNode24(workflow, "npm-publish");
 verifyRemoteActionPin(`docker://example.invalid/image@sha256:${"a".repeat(64)}`, "fixture");
 for (const value of ["docker://example.invalid/image:latest", "docker://example.invalid/image@main"]) {
   try {
@@ -187,6 +239,26 @@ if (
 ) {
   throw new Error("release workflow violates non-cancelling per-ref release concurrency");
 }
+const authoritativeJobClasses = [
+  ["archive", "archive", /shasum -a 256[\s\S]*actions\/upload-artifact@/],
+  ["attestation", "archive", /actions\/attest@/],
+  ["packaging", "npm-packages", /node scripts\/package-npm\.mjs[\s\S]*actions\/upload-artifact@/],
+  ["npm staging", "npm-publish", /node scripts\/stage-npm-packages\.mjs/],
+  [
+    "npm publish",
+    "npm-publish",
+    /^  npm-publish:\n    if: github\.event_name == 'push' && github\.ref_type == 'tag' && vars\.PUBLISH_NPM == 'true'$/m
+  ]
+];
+for (const [authorityClass, ownerJob, marker] of authoritativeJobClasses) {
+  const owner = jobBlock(workflow, ownerJob);
+  if (!marker.test(owner)) {
+    throw new Error(`release workflow has no recognized ${authorityClass} authority in ${ownerJob}`);
+  }
+  if (!transitivelyNeeds(workflow, ownerJob, "release-contract")) {
+    throw new Error(`${authorityClass} authority must transitively depend on release-contract`);
+  }
+}
 const jobContracts = [
   [
     "release-contract",
@@ -220,6 +292,11 @@ const jobContracts = [
   ],
   [
     "archive",
+    "ELF interpreter rejection",
+    /if readelf -l relay-linux-x86_64 \| grep -E '[^'\n]*INTERP[^'\n]*' >\/dev\/null; then[\s\S]*Linux release artifact has an ELF interpreter segment/
+  ],
+  [
+    "archive",
     "digest-pinned Ubuntu runtime smoke",
     /ubuntu:22\.04@sha256:0199853f6d6b20b0424f3c5694a72a62764f01e6a771b1eb48a4197848986c7e/
   ],
@@ -232,6 +309,11 @@ const jobContracts = [
     "archive",
     "isolated read-only amd64 runtime smoke",
     /--platform linux\/amd64[\s\S]*--network none[\s\S]*--read-only[\s\S]*--cap-drop ALL[\s\S]*--security-opt no-new-privileges[\s\S]*--user "\$\(id -u\):\$\(id -g\)"[\s\S]*--env RELAY_STATE_HOME=\/smoke\/state[\s\S]*\/opt\/relay --version; \/opt\/relay --help >\/tmp\/help; \/opt\/relay init >\/tmp\/init; \/opt\/relay status >\/tmp\/status/
+  ],
+  [
+    "archive",
+    "read-only release artifact mount with disposable writable state",
+    /--read-only[\s\S]*--tmpfs \/tmp:rw,noexec,nosuid,size=16m[\s\S]*--mount "type=bind,src=\$PWD\/relay-linux-x86_64,dst=\/opt\/relay,readonly"[\s\S]*--mount "type=bind,src=\$smoke_root,dst=\/smoke"/
   ],
   [
     "npm-packages",
@@ -263,6 +345,11 @@ const jobContracts = [
     "npm-publish",
     "verified npm artifact extraction",
     /archive="npm-packages\/npm-packages\.zip"\n          actual_archives="\$\(find npm-packages -mindepth 1 -maxdepth 1 -exec basename \{\} \\; \| LC_ALL=C sort\)"\n          test "\$actual_archives" = "npm-packages\.zip"[\s\S]*actual="\$\(unzip -Z1 "\$archive" \| LC_ALL=C sort\)"\n          test "\$actual" = "\$expected"\n          unzip -q "\$archive" -d npm-packages/
+  ],
+  [
+    "npm-publish",
+    "contract-authoritative publish version",
+    /RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}\n        run: \|\n          test -n "\$RELEASE_VERSION"/
   ]
 ];
 
@@ -277,17 +364,16 @@ if (/runs-on: ubuntu-latest/.test(workflow)) {
 if ((workflow.match(/@sha256:[0-9a-f]{64}/g) ?? []).length !== 2) {
   throw new Error("release workflow must use exactly two reviewed runtime image digests");
 }
-if (/sed -n 's\/\^version/.test(workflow)) {
-  throw new Error("downstream release jobs must consume the verified contract version");
-}
 if (/\bNPM_TOKEN\b/.test(workflow)) {
   throw new Error("release workflow must not use a long-lived npm token");
 }
 
+const codeqlWorkflowPermissions = mappingEntries(codeqlWorkflow, "permissions:");
+const codeqlAnalyzePermissions = mappingEntries(jobBlock(codeqlWorkflow, "analyze"), "    permissions:");
 if (
-  !/permissions:\n  contents: read[\s\S]*analyze:\n    name: Analyze \(\$\{\{ matrix\.language \}\}\)[\s\S]*permissions:\n      contents: read\n      security-events: write/.test(
-    codeqlWorkflow
-  )
+  JSON.stringify(codeqlWorkflowPermissions) !== JSON.stringify(["  contents: read"]) ||
+  JSON.stringify(codeqlAnalyzePermissions) !==
+    JSON.stringify(["      contents: read", "      security-events: write"])
 ) {
   throw new Error("CodeQL workflow must use explicit least-privilege permissions");
 }
