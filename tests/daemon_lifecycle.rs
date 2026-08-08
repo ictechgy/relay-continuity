@@ -636,6 +636,66 @@ fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
 
 #[cfg(unix)]
 #[test]
+fn corrupt_database_is_preserved_before_safe_recovery() {
+    let root = git_fixture("corrupt-database-recovery-test");
+    let initialized = run(&root, &["init"]);
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+
+    let database = state_database(&root);
+    fs::write(&database, b"not a sqlite database").expect("replace database with foreign bytes");
+    fs::write(database.with_file_name("evidence.sqlite-wal"), b"stale wal")
+        .expect("write stale WAL");
+    fs::write(database.with_file_name("evidence.sqlite-shm"), b"stale shm")
+        .expect("write stale shared-memory sidecar");
+
+    let recovered = run(&root, &["status"]);
+    assert!(
+        recovered.status.success(),
+        "recovery failed: {}",
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let connection = Connection::open(&database).expect("open recovered evidence database");
+    let recovered_events: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='recovered'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count recovery events");
+    assert_eq!(recovered_events, 1, "record one recovery event");
+    drop(connection);
+
+    let names = directory_entry_names(database.parent().expect("evidence parent"));
+    assert!(
+        names
+            .iter()
+            .any(|name| name.starts_with("evidence.sqlite.corrupt-")
+                && !name.ends_with("-wal")
+                && !name.ends_with("-shm")),
+        "preserve the corrupt database"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| { name.starts_with("evidence.sqlite.corrupt-") && name.ends_with("-wal") }),
+        "preserve the stale WAL"
+    );
+    assert!(
+        names
+            .iter()
+            .any(|name| { name.starts_with("evidence.sqlite.corrupt-") && name.ends_with("-shm") }),
+        "preserve the stale shared-memory sidecar"
+    );
+
+    fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_distinguishes_managed_directory_open_failures_from_unsafe_paths() {
     use std::os::unix::fs::PermissionsExt;
 
