@@ -2473,9 +2473,12 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
     let wrapper_directory = root.join("git-wrapper-bin");
     fs::create_dir(&wrapper_directory).expect("create Git wrapper directory");
     let wrapper = wrapper_directory.join("git");
+    let guarded_variables = GIT_REPOSITORY_ENV_REMOVALS.join(" ");
     fs::write(
         &wrapper,
-        "#!/bin/sh\nfor variable in GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_DIR GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_GRAFT_FILE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_NAMESPACE GIT_NO_REPLACE_OBJECTS GIT_OBJECT_DIRECTORY GIT_PREFIX GIT_REFERENCE_BACKEND GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_WORK_TREE; do\n  eval \"value=\\${$variable-}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${GIT_OPTIONAL_LOCKS:-}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${GIT_NO_LAZY_FETCH:-}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${GIT_ASKPASS:-}\" != \"preserve-sentinel\" ] || [ \"${GIT_CONFIG_GLOBAL:-}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n",
+        format!(
+            "#!/bin/sh\nfor variable in {guarded_variables}; do\n  eval \"value=\\${{$variable-}}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${{GIT_OPTIONAL_LOCKS:-}}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${{GIT_NO_LAZY_FETCH:-}}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${{GIT_ASKPASS:-}}\" != \"preserve-sentinel\" ] || [ \"${{GIT_CONFIG_GLOBAL:-}}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n"
+        ),
     )
     .expect("write Git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))
