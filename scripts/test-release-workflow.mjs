@@ -122,111 +122,96 @@ if ((workflow.match(/test ! -L /g) ?? []).length !== 4) {
   throw new Error("release workflow must reject symlinked artifact payloads after extraction");
 }
 
-const contracts = [
+if (
+  !/concurrency:\n  group: release-\$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false/.test(
+    workflow
+  )
+) {
+  throw new Error("release workflow violates non-cancelling per-ref release concurrency");
+}
+const jobContracts = [
   [
-    "non-cancelling per-ref release concurrency",
-    /concurrency:\n  group: release-\$\{\{ github\.workflow \}\}-\$\{\{ github\.ref \}\}\n  cancel-in-progress: false/
-  ],
-  [
+    "release-contract",
     "early release identity contract",
     /  release-contract:\n    runs-on: ubuntu-22\.04\n    timeout-minutes: 5\n    permissions:\n      contents: read\n    outputs:\n      version: \$\{\{ steps\.verify\.outputs\.version \}\}[\s\S]*node scripts\/verify-release-contract\.mjs[\s\S]*--cargo Cargo\.toml[\s\S]*--event-name "\$RELEASE_EVENT_NAME"[\s\S]*--ref-type "\$RELEASE_REF_TYPE"[\s\S]*--ref-name "\$RELEASE_REF_NAME"[\s\S]*--github-output "\$GITHUB_OUTPUT"/
   ],
   [
+    "archive",
     "archive attestation authority",
     /  archive:\n    needs: release-contract\n    timeout-minutes: 35\n    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n/
   ],
   [
+    "npm-packages",
     "packaging attestation read authority",
     /  npm-packages:\n    needs: \[release-contract, archive\]\n    runs-on: ubuntu-22\.04\n    timeout-minutes: 20\n    permissions:\n      attestations: read\n      contents: read\n    steps:\n/
   ],
   [
+    "npm-publish",
     "publish dependency and timeout",
-    /  npm-publish:[\s\S]*needs: \[release-contract, npm-packages\]\n    runs-on: ubuntu-22\.04\n    timeout-minutes: 15/
+    /  npm-publish:[\s\S]*needs: \[release-contract, npm-packages\]\n    runs-on: ubuntu-22\.04\n    timeout-minutes: 15[\s\S]*archive="npm-packages\/npm-packages\.zip"/
   ],
   [
+    "archive",
     "portable Linux target with stable asset name",
-    /- os: ubuntu-22\.04\n            asset: linux-x86_64\n            target: x86_64-unknown-linux-musl[\s\S]*cargo build --release --locked --target "\$\{\{ matrix\.target \}\}"[\s\S]*target\/\$\{\{ matrix\.target \}\}\/release\/relay"/
+    /- os: ubuntu-22\.04\n            asset: linux-x86_64\n            target: x86_64-unknown-linux-musl[\s\S]*cargo build --release --locked --target "\$\{\{ matrix\.target \}\}"[\s\S]*target\/\$\{\{ matrix\.target \}\}\/release\/relay"[\s\S]*file relay-linux-x86_64[\s\S]*--platform linux\/amd64[\s\S]*--network none[\s\S]*--read-only[\s\S]*--cap-drop ALL/
   ],
   [
+    "archive",
     "dynamic and GLIBC rejection",
     /file relay-linux-x86_64 \| grep -E 'x86-64\.\*static' >\/dev\/null[\s\S]*readelf -d relay-linux-x86_64 \| grep '\(NEEDED\)' >\/dev\/null[\s\S]*strings relay-linux-x86_64 \| grep -E 'GLIBC_\[0-9\]' >\/dev\/null/
   ],
   [
+    "archive",
     "digest-pinned Ubuntu runtime smoke",
     /ubuntu:22\.04@sha256:0199853f6d6b20b0424f3c5694a72a62764f01e6a771b1eb48a4197848986c7e/
   ],
   [
+    "archive",
     "digest-pinned Debian runtime smoke",
     /debian:12-slim@sha256:1def178129dfb5f24db43afbf2fcac04530012e3264ba4ff81c71184e17a9ee4/
   ],
   [
+    "archive",
     "isolated read-only amd64 runtime smoke",
     /--platform linux\/amd64[\s\S]*--network none[\s\S]*--read-only[\s\S]*--cap-drop ALL[\s\S]*--security-opt no-new-privileges[\s\S]*--user "\$\(id -u\):\$\(id -g\)"[\s\S]*--env RELAY_STATE_HOME=\/smoke\/state[\s\S]*\/opt\/relay --version; \/opt\/relay --help >\/tmp\/help; \/opt\/relay init >\/tmp\/init; \/opt\/relay status >\/tmp\/status/
   ],
   [
+    "npm-packages",
     "contract-authoritative package version",
-    /RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}/
+    /RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}[\s\S]*node scripts\/verify-npm-packages\.mjs/
   ],
   [
+    "archive",
     "pinned attestation action",
     /actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4\.2\.2/
   ],
-  ["ephemeral GitHub CLI authentication", /GH_TOKEN: \$\{\{ github\.token \}\}/],
-  ["repository provenance binding", /--repo "\$GITHUB_REPOSITORY"/],
-  ["workflow provenance binding", /--signer-workflow "\$SIGNER_WORKFLOW"/],
-  ["source ref binding", /--source-ref "\$GITHUB_REF"/],
-  ["source commit binding", /--source-digest "\$GITHUB_SHA"/],
-  ["hosted runner policy", /--deny-self-hosted-runners/],
+  ["npm-packages", "ephemeral GitHub CLI authentication", /GH_TOKEN: \$\{\{ github\.token \}\}/],
+  ["npm-packages", "repository provenance binding", /--repo "\$GITHUB_REPOSITORY"/],
+  ["npm-packages", "workflow provenance binding", /--signer-workflow "\$SIGNER_WORKFLOW"/],
+  ["npm-packages", "source ref binding", /--source-ref "\$GITHUB_REF"/],
+  ["npm-packages", "source commit binding", /--source-digest "\$GITHUB_SHA"/],
+  ["npm-packages", "hosted runner policy", /--deny-self-hosted-runners/],
   [
+    "npm-packages",
     "native payload verification input",
     /node scripts\/verify-npm-packages\.mjs \\\n            --output dist\/npm \\\n            --artifacts release-assets/
   ],
   [
+    "npm-packages",
     "verified native artifact extraction",
     /actual_archives="\$\(find release-assets -mindepth 1 -maxdepth 1 -exec basename \{\} \\; \| LC_ALL=C sort\)"\n          test "\$actual_archives" = "\$expected_archives"[\s\S]*expected="\$\(printf 'relay-%s\\nrelay-%s\.sha256\\n' "\$asset" "\$asset" \| LC_ALL=C sort\)"\n            actual="\$\(unzip -Z1 "\$archive" \| LC_ALL=C sort\)"\n            test "\$actual" = "\$expected"\n            unzip -q "\$archive" -d release-assets/
   ],
   [
+    "npm-publish",
     "verified npm artifact extraction",
     /archive="npm-packages\/npm-packages\.zip"\n          actual_archives="\$\(find npm-packages -mindepth 1 -maxdepth 1 -exec basename \{\} \\; \| LC_ALL=C sort\)"\n          test "\$actual_archives" = "npm-packages\.zip"[\s\S]*actual="\$\(unzip -Z1 "\$archive" \| LC_ALL=C sort\)"\n          test "\$actual" = "\$expected"\n          unzip -q "\$archive" -d npm-packages/
   ]
 ];
 
-for (const [name, pattern] of contracts) {
-  if (!pattern.test(workflow)) throw new Error(`release workflow violates ${name}`);
-}
-const releaseContractJob = jobBlock(workflow, "release-contract");
-const archiveJob = jobBlock(workflow, "archive");
-const npmPackagesJob = jobBlock(workflow, "npm-packages");
-const npmPublishJob = jobBlock(workflow, "npm-publish");
-const scopedContracts = [
-  [
-    "release identity job scope",
-    releaseContractJob,
-    /runs-on: ubuntu-22\.04[\s\S]*outputs:\n      version: \$\{\{ steps\.verify\.outputs\.version \}\}[\s\S]*node scripts\/verify-release-contract\.mjs[\s\S]*--github-output "\$GITHUB_OUTPUT"/
-  ],
-  [
-    "archive portable artifact scope",
-    archiveJob,
-    /target: x86_64-unknown-linux-musl[\s\S]*cargo build --release --locked --target[\s\S]*file relay-linux-x86_64[\s\S]*--platform linux\/amd64[\s\S]*--network none[\s\S]*--read-only[\s\S]*--cap-drop ALL/
-  ],
-  [
-    "archive attestation scope",
-    archiveJob,
-    /attestations: write[\s\S]*id-token: write[\s\S]*actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4\.2\.2/
-  ],
-  [
-    "packaging verified version scope",
-    npmPackagesJob,
-    /needs: \[release-contract, archive\][\s\S]*RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}[\s\S]*node scripts\/verify-npm-packages\.mjs/
-  ],
-  [
-    "publish verified extraction scope",
-    npmPublishJob,
-    /needs: \[release-contract, npm-packages\][\s\S]*test "\$actual_archives" = "npm-packages\.zip"[\s\S]*test "\$actual" = "\$expected"/
-  ]
-];
-for (const [name, source, pattern] of scopedContracts) {
-  if (!pattern.test(source)) throw new Error(`release workflow violates ${name}`);
+const jobBlocks = new Map();
+for (const [jobName, name, pattern] of jobContracts) {
+  if (!jobBlocks.has(jobName)) jobBlocks.set(jobName, jobBlock(workflow, jobName));
+  if (!pattern.test(jobBlocks.get(jobName))) throw new Error(`release workflow violates ${name}`);
 }
 if (/runs-on: ubuntu-latest/.test(workflow)) {
   throw new Error("release workflow must use versioned Linux runner labels");
