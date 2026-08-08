@@ -100,20 +100,47 @@ function verifyNpmPublishTrigger(source) {
 }
 
 function productionGitStatusArgs(source) {
+  const functionMatch = source.match(
+    /fn dirty_entries_with_rules\([\s\S]*?\n}\nfn dirty_entries\(/
+  );
+  if (!functionMatch) {
+    throw new Error("production dirty-entry function could not be isolated");
+  }
+  const functionSource = functionMatch[0];
   const stringLiteral = /"(?:\\.|[^"\\])*"/g;
-  const calls = [...source.matchAll(/\bgit_bytes\(\s*root\s*,\s*&\[(?<arguments>[\s\S]*?)\]\s*,?\s*\)/g)];
+  const invocationCount = functionSource.match(/\bgit_bytes\s*\(/g)?.length ?? 0;
+  const calls = [
+    ...functionSource.matchAll(
+      /\bgit_bytes\(\s*root\s*,\s*&\[(?<arguments>[\s\S]*?)\]\s*,?\s*\)/g
+    )
+  ];
+  if (calls.length !== invocationCount) {
+    throw new Error("production git_bytes arguments must use a literal string slice");
+  }
   const statusCalls = calls
     .map(({ groups }) => {
       const rawArguments = groups.arguments;
-      if (rawArguments.replace(stringLiteral, "").replace(/[\s,]/g, "") !== "") return null;
+      if (rawArguments.replace(stringLiteral, "").replace(/[\s,]/g, "") !== "") {
+        throw new Error("production git_bytes slice contains a nonliteral argument");
+      }
       return [...rawArguments.matchAll(stringLiteral)].map(([literal]) => JSON.parse(literal));
     })
-    .filter((args) => args?.[0] === "status" && args.includes("--porcelain=v1"));
+    .filter((args) => args[0] === "status" && args.includes("--porcelain=v1"));
 
   if (statusCalls.length !== 1) {
     throw new Error(`expected exactly one production porcelain Git status call, found ${statusCalls.length}`);
   }
   return statusCalls[0];
+}
+
+function verifyNoFloatingRunnerLabels(source, sourceName) {
+  for (const [index, line] of source.split(/\r?\n/).entries()) {
+    const match = line.match(/^\s*runs-on:\s*(.*?)\s*(?:#.*)?$/);
+    if (!match) continue;
+    if (/(?:^|[\s,[{"'])([A-Za-z0-9._-]+-latest)(?=$|[\s,\]}"'])/.test(match[1])) {
+      throw new Error(`${sourceName} workflow line ${index + 1} uses a floating runner label`);
+    }
+  }
 }
 
 function verifyReleaseSmokeGitStatusFixture(workflowSource, rustSource) {
@@ -153,6 +180,7 @@ for (const [sourceName, source] of [
   ["release", workflow],
   ["codeql", codeqlWorkflow]
 ]) {
+  verifyNoFloatingRunnerLabels(source, sourceName);
   for (const [index, line] of source.split(/\r?\n/).entries()) {
     const uses = line.match(/^\s*(?:-\s*)?uses\s*:\s*(?:"([^"]*)"|'([^']*)'|([^#]*?))(?:\s+#\s*(.*?)\s*)?$/);
     if (!uses) continue;
@@ -209,6 +237,35 @@ for (const fragment of [
   }
 }
 const productionStatusInvocation = verifyReleaseSmokeGitStatusFixture(workflow, relayMain);
+const nonliteralStatusMutations = [
+  [
+    relayMain.replace('"--untracked-files=normal"', "git_status_mode()"),
+    "production git_bytes slice contains a nonliteral argument"
+  ],
+  [
+    relayMain.replace(
+      '&["status", "--porcelain=v1", "-z", "--untracked-files=normal"]',
+      "git_status_args()"
+    ),
+    "production git_bytes arguments must use a literal string slice"
+  ]
+];
+for (const [mutatedSource, expectedError] of nonliteralStatusMutations) {
+  if (mutatedSource === relayMain) {
+    throw new Error("production Git status nonliteral mutation fixture not found");
+  }
+  try {
+    productionGitStatusArgs(mutatedSource);
+    throw new Error("nonliteral production Git status argument unexpectedly passed");
+  } catch (error) {
+    if (error.message === "nonliteral production Git status argument unexpectedly passed") throw error;
+    if (error.message !== expectedError) {
+      throw new Error(
+        `nonliteral production Git status mutation failed for the wrong reason: ${error.message}`
+      );
+    }
+  }
+}
 const driftedWorkflow = workflow.replace(
   productionStatusInvocation,
   `${productionStatusInvocation} --fixture-drift`
@@ -358,8 +415,18 @@ for (const [jobName, name, pattern] of jobContracts) {
   if (!jobBlocks.has(jobName)) jobBlocks.set(jobName, jobBlock(workflow, jobName));
   if (!pattern.test(jobBlocks.get(jobName))) throw new Error(`release workflow violates ${name}`);
 }
-if (/runs-on: ubuntu-latest/.test(workflow)) {
-  throw new Error("release workflow must use versioned Linux runner labels");
+for (const runner of [
+  "ubuntu-latest",
+  "'macos-latest'",
+  '"windows-latest"',
+  "[self-hosted, custom-latest]"
+]) {
+  try {
+    verifyNoFloatingRunnerLabels(`jobs:\n  fixture:\n    runs-on: ${runner}\n`, "fixture");
+    throw new Error(`floating runner label unexpectedly passed: ${runner}`);
+  } catch (error) {
+    if (error.message.startsWith("floating runner label unexpectedly passed")) throw error;
+  }
 }
 if ((workflow.match(/@sha256:[0-9a-f]{64}/g) ?? []).length !== 2) {
   throw new Error("release workflow must use exactly two reviewed runtime image digests");

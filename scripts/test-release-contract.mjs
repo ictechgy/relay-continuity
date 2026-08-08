@@ -37,6 +37,16 @@ function expectStatus(result, status, label) {
   }
 }
 
+function expectRejected(result, label, reason) {
+  expectStatus(result, 1, label);
+  const expected = `release contract rejected: ${reason}`;
+  if (result.stderr.trim() !== expected) {
+    throw new Error(
+      `${label}: expected stderr ${JSON.stringify(expected)}, received ${JSON.stringify(result.stderr.trim())}`
+    );
+  }
+}
+
 const fixture = await mkdtemp(join(tmpdir(), "relay-release-contract-test-"));
 try {
   const cargoPath = join(fixture, "Cargo.toml");
@@ -67,54 +77,96 @@ try {
   await writeFile(cargoPath, cargo("0.2.0-rc.9"));
 
   const rejected = [
-    ["push", "tag", "v0.2.0-rc.8", "mismatched tag"],
-    ["push", "branch", "main", "branch push"],
-    ["workflow_dispatch", "tag", "v0.2.0", "manual mismatched tag"],
-    ["workflow_dispatch", "commit", "deadbeef", "manual unsupported ref"],
-    ["pull_request", "branch", "main", "unsupported event"]
+    [
+      "push",
+      "tag",
+      "v0.2.0-rc.8",
+      "mismatched tag",
+      "release tag does not exactly match the Cargo package version"
+    ],
+    ["push", "branch", "main", "branch push", "release push must be a tag ref"],
+    [
+      "workflow_dispatch",
+      "tag",
+      "v0.2.0",
+      "manual mismatched tag",
+      "release tag does not exactly match the Cargo package version"
+    ],
+    [
+      "workflow_dispatch",
+      "commit",
+      "deadbeef",
+      "manual unsupported ref",
+      "manual release ref must be a branch or tag"
+    ],
+    ["pull_request", "branch", "main", "unsupported event", "unsupported release event"]
   ];
-  for (const [eventName, refType, refName, label] of rejected) {
-    expectStatus(run(cargoPath, eventName, refType, refName), 1, label);
+  for (const [eventName, refType, refName, label, reason] of rejected) {
+    expectRejected(run(cargoPath, eventName, refType, refName), label, reason);
   }
 
   for (const invalid of ["01.2.3", "1.02.3", "1.2", "1.2.3-01", "1.2.3-"]) {
     await writeFile(cargoPath, cargo(invalid));
-    expectStatus(run(cargoPath, "push", "tag", `v${invalid}`), 1, `invalid SemVer ${invalid}`);
+    expectRejected(
+      run(cargoPath, "push", "tag", `v${invalid}`),
+      `invalid SemVer ${invalid}`,
+      "Cargo package version is not valid SemVer"
+    );
   }
 
   await writeFile(cargoPath, cargo("1.2.3", 'version = "9.9.9"'));
-  expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "duplicate package version");
+  expectRejected(
+    run(cargoPath, "push", "tag", "v1.2.3"),
+    "duplicate package version",
+    "Cargo.toml [package] must contain exactly one literal version"
+  );
 
   await writeFile(cargoPath, cargo("1.2.3", "version = '9.9.9'"));
-  expectStatus(
+  expectRejected(
     run(cargoPath, "push", "tag", "v1.2.3"),
-    1,
-    "mixed-quote duplicate package version"
+    "mixed-quote duplicate package version",
+    "Cargo.toml [package] must contain exactly one literal version"
   );
 
   const oversizedVersion = `1.2.3-${"a".repeat(257)}`;
   await writeFile(cargoPath, cargo(oversizedVersion));
-  expectStatus(
+  expectRejected(
     run(cargoPath, "push", "tag", `v${oversizedVersion}`),
-    1,
-    "oversized version"
+    "oversized version",
+    "Cargo package version is not valid SemVer"
   );
 
   await writeFile(cargoPath, `${cargo("1.2.3")}#${"x".repeat(1024 * 1024)}`);
-  expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "oversized Cargo.toml");
+  expectRejected(
+    run(cargoPath, "push", "tag", "v1.2.3"),
+    "oversized Cargo.toml",
+    "Cargo.toml must be a regular non-symlink file within the size limit"
+  );
 
   const symlinkTarget = join(fixture, "Cargo.target.toml");
   const symlinkPath = join(fixture, "Cargo.symlink.toml");
   await writeFile(symlinkTarget, cargo("1.2.3"));
   await symlink(symlinkTarget, symlinkPath);
-  expectStatus(run(symlinkPath, "push", "tag", "v1.2.3"), 1, "symlinked Cargo.toml");
+  expectRejected(
+    run(symlinkPath, "push", "tag", "v1.2.3"),
+    "symlinked Cargo.toml",
+    "Cargo.toml must be a regular non-symlink file within the size limit"
+  );
 
   const directoryPath = join(fixture, "Cargo.directory.toml");
   await mkdir(directoryPath);
-  expectStatus(run(directoryPath, "push", "tag", "v1.2.3"), 1, "directory Cargo.toml");
+  expectRejected(
+    run(directoryPath, "push", "tag", "v1.2.3"),
+    "directory Cargo.toml",
+    "Cargo.toml must be a regular non-symlink file within the size limit"
+  );
 
   await writeFile(cargoPath, `[workspace]\nmembers = []\n`);
-  expectStatus(run(cargoPath, "push", "tag", "v1.2.3"), 1, "missing package section");
+  expectRejected(
+    run(cargoPath, "push", "tag", "v1.2.3"),
+    "missing package section",
+    "Cargo.toml has no [package] section"
+  );
 } finally {
   await rm(fixture, { recursive: true, force: true });
 }
