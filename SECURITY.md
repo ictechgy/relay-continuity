@@ -36,10 +36,18 @@ refresh succeeds. Transient Git failures are retried. Only fixed degradation
 categories are stored or displayed; raw diagnostics and paths are not retained.
 
 `relay doctor` is diagnostic only. It uses bounded header/presence and managed
-state probes, never opens the evidence database through the creating/recovery
-path, and never repairs, quarantines, migrates, compacts, installs, enables, or
-removes state. Its output is an allowlist of fixed states and reason codes; it
-does not include raw filesystem/SQLite errors or workspace metadata.
+state probes. Evidence inspection opens the state directory, repository state,
+and database through no-follow descriptors and validates the database header on
+the same opened file; it never uses the creating/recovery path and never repairs,
+quarantines, migrates, compacts, installs, enables, or removes state. Its output
+is an allowlist of fixed states and reason codes; it does not include raw
+filesystem/SQLite errors or workspace metadata.
+
+Repository CodeQL scans keep local-source threat modeling enabled for product
+code, release tooling, and workflows. The black-box `tests/` harness is excluded
+from static path-injection results because it intentionally drives hostile
+temporary paths; those tests remain mandatory in the compiler, Clippy, and CI
+gates.
 
 Tagged native builds receive GitHub artifact attestations scoped to the exact
 repository, release workflow, Git ref, and commit. npm packaging verifies those

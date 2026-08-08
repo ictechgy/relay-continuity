@@ -610,7 +610,27 @@ fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
         "PRECIOUS"
     );
 
+    fs::remove_file(&database).expect("remove evidence symlink fixture");
+    let repository_state = database.parent().expect("evidence parent").to_path_buf();
+    fs::remove_dir_all(&repository_state).expect("remove repository state fixture");
+    let outside_state = state_home.join("outside-ghp_state_symlink_secret");
+    fs::create_dir(&outside_state).expect("create outside repository state");
+    let outside_database = outside_state.join("evidence.sqlite");
+    fs::write(&outside_database, "PRECIOUS-STATE").expect("write outside evidence");
+    symlink(&outside_state, &repository_state).expect("install repository state symlink");
+
+    let directory_symlinked = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+    assert_eq!(directory_symlinked.status.code(), Some(1));
+    let body = assert_doctor_json(&directory_symlinked);
+    assert!(body.contains("evidence-path-unsafe"));
+    assert!(!body.contains("ghp_state_symlink_secret"));
+    assert_eq!(
+        fs::read_to_string(&outside_database).expect("read outside evidence"),
+        "PRECIOUS-STATE"
+    );
+
     fs::remove_dir_all(root).expect("remove fixture");
+    fs::remove_file(repository_state).expect("remove repository state symlink");
     fs::remove_dir_all(state_home).expect("remove isolated state");
 }
 

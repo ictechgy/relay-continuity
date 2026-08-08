@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflow = await readFile(resolve(root, ".github/workflows/release.yml"), "utf8");
 const ciWorkflow = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+const codeqlWorkflow = await readFile(resolve(root, ".github/workflows/codeql.yml"), "utf8");
+const codeqlConfig = await readFile(resolve(root, ".github/codeql/codeql-config.yml"), "utf8");
 
 function jobBlock(source, name) {
   const lines = source.split(/\r?\n/);
@@ -51,14 +53,17 @@ const githubActionPins = new Map([
   ["actions/checkout", { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", version: "v7.0.1" }],
   ["actions/upload-artifact", { sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", version: "v7.0.1" }],
   ["actions/download-artifact", { sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", version: "v8.0.1" }],
-  ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0" }]
+  ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0" }],
+  ["github/codeql-action/init", { sha: "5595ccaf912efad79be6eef63a5619ff05969be3", version: "v4.37.6" }],
+  ["github/codeql-action/analyze", { sha: "5595ccaf912efad79be6eef63a5619ff05969be3", version: "v4.37.6" }]
 ]);
 const actionCounts = new Map([...githubActionPins.keys()].map((action) => [action, 0]));
-const combinedWorkflows = `${ciWorkflow}\n${workflow}`;
+const combinedWorkflows = `${ciWorkflow}\n${workflow}\n${codeqlWorkflow}`;
 
 for (const [sourceName, source] of [
   ["ci", ciWorkflow],
-  ["release", workflow]
+  ["release", workflow],
+  ["codeql", codeqlWorkflow]
 ]) {
   for (const [index, line] of source.split(/\r?\n/).entries()) {
     const uses = line.match(/^\s*(?:-\s*)?uses\s*:\s*(?:"([^"]*)"|'([^']*)'|([^#]*?))(?:\s+#\s*(.*?)\s*)?$/);
@@ -226,4 +231,39 @@ if (/\bNPM_TOKEN\b/.test(workflow)) {
   throw new Error("release workflow must not use a long-lived npm token");
 }
 
-process.stdout.write("Verified release workflow authority and provenance contracts.\n");
+if (
+  !/permissions:\n  contents: read[\s\S]*analyze:\n    name: Analyze \(\$\{\{ matrix\.language \}\}\)[\s\S]*permissions:\n      contents: read\n      packages: read\n      security-events: write/.test(
+    codeqlWorkflow
+  )
+) {
+  throw new Error("CodeQL workflow must use explicit least-privilege permissions");
+}
+for (const language of ["actions", "javascript-typescript", "rust"]) {
+  if (!new RegExp(`- language: ${language}\\n            build-mode: none`).test(codeqlWorkflow)) {
+    throw new Error(`CodeQL workflow must analyze ${language} without a build`);
+  }
+}
+if (
+  !/config-file: \.\/\.github\/codeql\/codeql-config\.yml/.test(codeqlWorkflow) ||
+  !/category: \/language:\$\{\{ matrix\.language \}\}/.test(codeqlWorkflow)
+) {
+  throw new Error("CodeQL workflow must bind the reviewed configuration and stable categories");
+}
+const codeqlConfigContract = codeqlConfig
+  .split(/\r?\n/)
+  .filter((line) => line.trim() && !line.trimStart().startsWith("#"));
+if (
+  JSON.stringify(codeqlConfigContract) !==
+  JSON.stringify([
+    'name: "Relay CodeQL configuration"',
+    "threat-models: local",
+    "paths-ignore:",
+    '  - "tests/**"'
+  ])
+) {
+  throw new Error(
+    "CodeQL configuration must retain local-source analysis and exclude only black-box tests"
+  );
+}
+
+process.stdout.write("Verified release and CodeQL workflow authority and provenance contracts.\n");
