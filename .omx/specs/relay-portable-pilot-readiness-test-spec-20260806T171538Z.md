@@ -18,6 +18,6 @@
 | Q3 | Dependency/review configuration | Dependabot covers Cargo and GitHub Actions on a bounded schedule; CodeRabbit covers source, tests, workflows, scripts, packages, docs, forms, manifests, and lockfiles. |
 | Q4 | Documentation truth | README, CONTRIBUTING, SECURITY, issue form, and distribution docs match doctor/version commands, portable Linux contract, supported prerelease policy, current gates, and provider limitations. |
 | R1 | Regression suite | fmt, locked check/test/clippy/release build, package/workflow/public-artifact scripts, `cargo audit --deny warnings`, and diff check pass. |
-| R2 | Architecture invariant audit | No network runtime, telemetry, new sensitive persistence, raw AI metadata, implicit repair, unsupported provider enablement, or unbounded repository scan was added. |
+| R2 | Architecture-invariant audit | No network runtime, telemetry, new sensitive persistence, raw AI metadata, implicit repair, unsupported provider enablement, or unbounded repository scan was added. |
 | R3 | Independent final review | Code/spec/security-performance reviewer and architect both issue explicit non-blocking verdicts for the same final head; fixes cause renewed review. |
 | E1 | External boundary | No tag, npm dist-tag, signing, service enablement, foreign hook mutation, branch/ruleset mutation, or GA claim occurs during repository-local completion. |
