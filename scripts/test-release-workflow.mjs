@@ -9,6 +9,7 @@ const workflow = await readFile(resolve(root, ".github/workflows/release.yml"), 
 const ciWorkflow = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
 const codeqlWorkflow = await readFile(resolve(root, ".github/workflows/codeql.yml"), "utf8");
 const codeqlConfig = await readFile(resolve(root, ".github/codeql/codeql-config.yml"), "utf8");
+const relayMain = await readFile(resolve(root, "src/main.rs"), "utf8");
 
 function jobBlock(source, name) {
   const lines = source.split(/\r?\n/);
@@ -47,6 +48,44 @@ function verifyNpmPublishTrigger(source) {
   ) {
     throw new Error("npm publish must require an enabled tag push");
   }
+}
+
+function productionGitStatusArgs(source) {
+  const stringLiteral = /"(?:\\.|[^"\\])*"/g;
+  const calls = [...source.matchAll(/\bgit_bytes\(\s*root\s*,\s*&\[(?<arguments>[\s\S]*?)\]\s*,?\s*\)/g)];
+  const statusCalls = calls
+    .map(({ groups }) => {
+      const rawArguments = groups.arguments;
+      if (rawArguments.replace(stringLiteral, "").replace(/[\s,]/g, "") !== "") return null;
+      return [...rawArguments.matchAll(stringLiteral)].map(([literal]) => JSON.parse(literal));
+    })
+    .filter((args) => args?.[0] === "status" && args.includes("--porcelain=v1"));
+
+  if (statusCalls.length !== 1) {
+    throw new Error(`expected exactly one production porcelain Git status call, found ${statusCalls.length}`);
+  }
+  return statusCalls[0];
+}
+
+function verifyReleaseSmokeGitStatusFixture(workflowSource, rustSource) {
+  const expected = productionGitStatusArgs(rustSource).join(" ");
+  const archiveJob = jobBlock(workflowSource, "archive");
+  if ((archiveJob.match(/^\s*'case "\$\*" in'\s*\\\s*$/gm) ?? []).length !== 1) {
+    throw new Error("release smoke fake Git fixture must match the complete argument vector");
+  }
+  const fakeGitCommands = [
+    ...archiveJob.matchAll(/^\s*'\s*"([^"]+)"\)\s+.*;;'\s*\\\s*$/gm)
+  ].map((match) => match[1]);
+  const statusCommands = fakeGitCommands.filter(
+    (command) => command === "status" || command.startsWith("status ")
+  );
+
+  if (statusCommands.length !== 1 || statusCommands[0] !== expected) {
+    throw new Error(
+      `release smoke fake Git status fixture must match production exactly: expected ${JSON.stringify(expected)}, found ${JSON.stringify(statusCommands)}`
+    );
+  }
+  return expected;
 }
 
 const githubActionPins = new Map([
@@ -116,6 +155,20 @@ for (const fragment of [
   } catch (error) {
     if (error.message.startsWith("weakened npm publish trigger unexpectedly passed")) throw error;
   }
+}
+const productionStatusInvocation = verifyReleaseSmokeGitStatusFixture(workflow, relayMain);
+const driftedWorkflow = workflow.replace(
+  productionStatusInvocation,
+  `${productionStatusInvocation} --fixture-drift`
+);
+if (driftedWorkflow === workflow) {
+  throw new Error("release smoke Git status mutation fixture not found");
+}
+try {
+  verifyReleaseSmokeGitStatusFixture(driftedWorkflow, relayMain);
+  throw new Error("drifted release smoke Git status fixture unexpectedly passed");
+} catch (error) {
+  if (error.message === "drifted release smoke Git status fixture unexpectedly passed") throw error;
 }
 if (!/actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n          registry-url: https:\/\/registry\.npmjs\.org\n          package-manager-cache: false\n/.test(workflow)) {
   throw new Error("release workflow must disable setup-node package-manager caching explicitly");

@@ -104,7 +104,7 @@ jobs:
               '  "rev-parse --show-toplevel") printf "/smoke/repo\\n" ;;' \
               '  "rev-parse --verify --quiet HEAD") exit 1 ;;' \
               '  "symbolic-ref --quiet HEAD") printf "refs/heads/main\\n" ;;' \
-              '  "status --porcelain=v1 -z") exit 0 ;;' \
+              '  "status --porcelain=v1 -z --untracked-files=normal") exit 0 ;;' \
               '  "branch --show-current") printf "main\\n" ;;' \
               '  *) exit 1 ;;' \
               'esac' > "$smoke_root/bin/git"
