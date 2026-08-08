@@ -3,72 +3,141 @@
   "omxAvailable": false,
   "status": "complete",
   "currentGoal": null,
-  "completedGoal": "G111",
-  "sourceReview": ".omx/artifacts/claude-relay-whole-review-summary-20260806.md",
-  "sourceSnapshot": "632eb98678952d4deb2c1bf200c0df8ac67b2597",
-  "implementationSnapshot": "f40f6c0873635b2fa4ca52219dd95fe2fda9ac1d",
-  "binaryDiffSha256": "7dd15e76baec1bcc3e7ec88ded9405a6542050e41a4232c09e9597eb0d9df388",
+  "completedGoal": "G115",
+  "sourceReview": ".omx/artifacts/code-review-g112-g115-final-20260808.md",
+  "sourceSnapshot": "3bd67c5d3ed04bab389672389bf5ad542cb58a1f",
+  "implementationSnapshot": "702ae09e78c03d9590d316cc465b1bd30cb72a95",
+  "mergeSnapshot": "9c5dbc7e16438d2ba06c9220cd246aa532fa090b",
+  "implementationTree": "118b02baac964a9cffd1f29d7a8a9b5926b958e1",
+  "binaryDiffSha256": "d4e9d7783f3669dddc473e1b78f649c7278a50a86e209b06cdcb1cdd7b6febe6",
+  "codexGoalSnapshot": "update_goal returned complete; fresh get_goal returned null",
+  "codexTokensUsed": 704491,
+  "codexTimeUsedSeconds": 4660,
   "requiredFinalGates": {
     "aiSlopCleaner": "passed",
     "verification": "passed",
     "codeReviewRecommendation": "APPROVE",
     "architectStatus": "CLEAR",
-    "architectureInvariantGate": "passed"
+    "architectureInvariantGate": "passed",
+    "codeRabbit": "passed",
+    "hostedMainVerification": "passed",
+    "codeqlAdvanced": "passed"
   },
   "finalQualityGate": {
-    "goalId": "G111",
+    "goalId": "G115",
     "aiSlopCleaner": {
       "status": "passed",
-      "evidence": ".omx/artifacts/ai-slop-cleanup-g107-g110-20260806.md"
+      "evidence": ".omx/artifacts/ai-slop-cleanup-portable-pilot-20260808.md"
     },
     "verification": {
       "status": "passed",
       "commands": [
         "cargo fmt --check",
         "cargo check --all-targets --locked",
-        "cargo test --locked (46 passed)",
+        "cargo test --locked (27 unit and 37 integration tests passed)",
         "cargo clippy --all-targets --all-features --locked -- -D warnings",
         "cargo build --release --locked",
-        "cargo audit --deny warnings (50 locked dependencies, 1189 advisories, no warnings)",
-        "JavaScript syntax checks for distribution scripts",
+        "cargo audit --deny warnings (50 locked dependencies, 1190 advisories, no findings)",
+        "JavaScript syntax checks for all distribution scripts and the npm wrapper",
         "node scripts/verify-npm-packages.mjs --templates",
         "node scripts/test-package-npm.mjs",
         "node scripts/test-relay-wrapper.mjs",
+        "node scripts/test-release-contract.mjs",
         "node scripts/test-release-workflow.mjs",
         "node scripts/verify-public-artifacts.mjs",
         "node scripts/test-public-artifacts.mjs",
+        "real release contract verification for 0.2.0-rc.9",
+        "hostile launchd value round-trip and systemd rendering",
         "Homebrew formula render and Ruby syntax",
-        "CI and release YAML parse",
-        "JSON and JSONL parse",
+        "workflow YAML, Ultragoal JSON, and ledger JSONL parse",
         "git diff --check"
-      ]
+      ],
+      "hosted": {
+        "pullRequestCi": "https://github.com/ictechgy/relay-continuity/actions/runs/31270764763",
+        "pullRequestCodeql": "https://github.com/ictechgy/relay-continuity/actions/runs/31270764773",
+        "safeReleaseRehearsal": "https://github.com/ictechgy/relay-continuity/actions/runs/31270771000",
+        "mainCi": "https://github.com/ictechgy/relay-continuity/actions/runs/31271264833",
+        "mainCodeql": "https://github.com/ictechgy/relay-continuity/actions/runs/31271264847"
+      }
     },
-    "independentReview": {
-      "status": "passed",
-      "evidence": ".omx/artifacts/code-review-g107-g111-final-20260806.md",
-      "snapshot": "f40f6c0873635b2fa4ca52219dd95fe2fda9ac1d",
-      "binaryDiffSha256": "7dd15e76baec1bcc3e7ec88ded9405a6542050e41a4232c09e9597eb0d9df388",
-      "codeReviewer": {
-        "verdict": "APPROVE",
-        "actionableFindings": 0
-      },
-      "architect": {
-        "verdict": "CLEAR",
-        "blockingConcerns": 0
+    "codeReview": {
+      "recommendation": "APPROVE",
+      "architectStatus": "CLEAR",
+      "evidence": ".omx/artifacts/code-review-g112-g115-final-20260808.md",
+      "independentReview": {
+        "codeReviewer": {
+          "agentRole": "code-reviewer",
+          "verdict": "APPROVE",
+          "snapshot": "702ae09e78c03d9590d316cc465b1bd30cb72a95",
+          "actionableFindings": 0
+        },
+        "architect": {
+          "agentRole": "architect",
+          "verdict": "CLEAR",
+          "snapshot": "702ae09e78c03d9590d316cc465b1bd30cb72a95",
+          "blockingConcerns": 0
+        }
       }
     },
     "architectureInvariantGate": {
       "status": "passed",
-      "evidence": ".omx/artifacts/architecture-invariant-audit-g107-g111-20260806.md"
+      "sourceArtifacts": [
+        ".omx/ultragoal/brief.md",
+        ".omx/ultragoal/goals.json",
+        ".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md",
+        ".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"
+      ],
+      "evidence": ".omx/artifacts/architecture-invariant-audit-g112-g115-20260808.md",
+      "invariants": [
+        {
+          "invariant": "Automatic AI context remains local, provider-neutral, bounded, and free of untrusted repository names.",
+          "source": ".omx/ultragoal/brief.md#privacy-and-trust-boundaries",
+          "status": "proved",
+          "implementationEvidence": "AI cards use fixed status and hash evidence and omit branch, path, note, repository, and raw diagnostic values.",
+          "testEvidence": "The hostile AI-card corpus and 4096-byte and 320-word bounds passed.",
+          "reviewEvidence": "Exact-head code APPROVE and architect CLEAR confirmed the boundary."
+        },
+        {
+          "invariant": "Doctor is a global, bounded, side-effect-free diagnostic surface.",
+          "source": ".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md#G113",
+          "status": "proved",
+          "implementationEvidence": "Doctor dispatches before repository and database creation and uses bounded no-follow inspection with fixed reasons.",
+          "testEvidence": "Outside-Git, fresh, healthy, hostile, daemon, integration, service, and missing-state fixtures passed without mutation.",
+          "reviewEvidence": "Exact-head architect review found no doctor boundary defect."
+        },
+        {
+          "invariant": "Release authority uses exact Cargo SemVer and portable verified Linux artifacts.",
+          "source": ".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md#G112",
+          "status": "proved",
+          "implementationEvidence": "Bounded frozen Cargo metadata, tag-only authority jobs, musl target, ELF rejection checks, and exact container smoke are enforced.",
+          "testEvidence": "Local release-contract and workflow mutation suites plus the hosted non-publishing rehearsal passed.",
+          "reviewEvidence": "Code reviewer, architect, CodeRabbit, CI, and CodeQL were clean on the exact head."
+        },
+        {
+          "invariant": "Workflow and runtime Git contracts are semantic, pinned, and fail closed.",
+          "source": ".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md#G114",
+          "status": "proved",
+          "implementationEvidence": "Real bounded YAML parsing validates every action reference, and runtime plus release smoke share a tracked Git-status argv fixture.",
+          "testEvidence": "Adversarial YAML mutations and compiled logging of every Git-status invocation passed.",
+          "reviewEvidence": "Exact-head CodeRabbit posted zero actionable or inline comments."
+        }
+      ]
+    },
+    "codeqlAdvanced": {
+      "status": "passed",
+      "evidence": ".omx/artifacts/codeql-advanced-closure-g112-g115-20260808.md",
+      "openAlerts": 0,
+      "alert266MostRecentState": "fixed",
+      "alert266Dismissed": false
     },
     "externalReleaseEvidence": {
-      "status": "not_yet_produced",
+      "status": "non_publishing_rehearsal_passed",
       "blockingRepositoryIntegration": false,
       "blockingFutureReleaseClaim": true,
-      "required": "A future tagged GitHub-hosted workflow must create and verify real attestations before staging or publication is claimed."
+      "required": "A future matching tag push must create and verify real artifacts and attestations before staging or publication is claimed."
     }
   },
-  "priorCompletedRun": {
+  "historicalG106": {
     "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
     "omxAvailable": false,
     "status": "complete",
@@ -232,5 +301,21 @@
         "evidence": "Final independent architect CLEAR at 314cfb9 and exact-head verification in the code-review artifact."
       }
     }
+  },
+  "priorCompletedRun": {
+    "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
+    "omxAvailable": false,
+    "status": "complete",
+    "completedGoal": "G111",
+    "implementationSnapshot": "f40f6c0873635b2fa4ca52219dd95fe2fda9ac1d",
+    "binaryDiffSha256": "7dd15e76baec1bcc3e7ec88ded9405a6542050e41a4232c09e9597eb0d9df388",
+    "aiSlopCleaner": ".omx/artifacts/ai-slop-cleanup-g107-g110-20260806.md",
+    "codeReview": ".omx/artifacts/code-review-g107-g111-final-20260806.md",
+    "architectureInvariantGate": ".omx/artifacts/architecture-invariant-audit-g107-g111-20260806.md",
+    "verdicts": {
+      "code": "APPROVE",
+      "architecture": "CLEAR"
+    },
+    "historicalPredecessor": "historicalG106"
   }
 }
