@@ -11,6 +11,23 @@ The npm wrapper supports `darwin-arm64`, `darwin-x64`, and `linux-x64`. It fails
 closed on unsupported platforms; in particular, Windows is not supported by
 Relay's managed-state safety model.
 
+The published v0.2.0-rc.9 Linux asset was built against glibc 2.39. It is not a
+portable older-distribution artifact. The current release workflow builds
+future `linux-x64` assets for `x86_64-unknown-linux-musl`, rejects dynamic ELF
+dependencies and GLIBC symbol contracts, and executes the exact binary in
+digest-pinned Ubuntu 22.04 and Debian 12 containers before packaging. Keep the
+public filename and npm platform package stable; compatibility comes from the
+binary contract, not a new package name.
+
+## Release identity gate
+
+A tag-triggered release is authorized only when the Git ref type is `tag`, the
+Cargo package version is valid SemVer, and the ref name is byte-for-byte
+`v${CARGO_VERSION}`. The release-contract job must pass before archive,
+attestation, npm packaging, or OIDC staging. `workflow_dispatch` remains a
+rehearsal route and must not be recorded as a tag release. Never create or move
+a tag merely to satisfy the workflow; correct the version/tag mismatch first.
+
 ## Publishing npm packages
 
 The release workflow gives each GitHub-hosted native build a GitHub artifact

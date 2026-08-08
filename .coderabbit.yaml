@@ -19,11 +19,19 @@ reviews:
   path_filters:
     - "!target/**"
     - ".github/workflows/**"
+    - ".github/codeql/**"
+    - ".github/ISSUE_TEMPLATE/**"
+    - ".github/dependabot.yml"
+    - ".github/CODEOWNERS"
     - ".omx/**"
     - "src/**"
     - "tests/**"
+    - "scripts/**"
+    - "packages/**"
+    - "docs/**"
     - "Cargo.toml"
     - "Cargo.lock"
+    - "rust-toolchain.toml"
     - "README.md"
     - "SECURITY.md"
     - "CONTRIBUTING.md"
@@ -40,14 +48,25 @@ reviews:
       instructions: >-
         Verify tests exercise the real CLI or filesystem boundary, clean up their
         state, and do not become timing-dependent or weaken security assertions.
-    - path: ".github/workflows/**"
+    - path: "{.github/workflows/**,.github/codeql/**}"
       instructions: >-
         Review release integrity: locked dependency builds, test coverage, least
         privilege permissions, immutable action references, and artifact checksums.
-    - path: "{README.md,SECURITY.md}"
+    - path: ".github/CODEOWNERS"
+      instructions: >-
+        Ensure security-sensitive source, workflow, packaging, and dependency
+        surfaces retain an explicit maintainer owner.
+    - path: "{scripts/**,packages/**}"
+      instructions: >-
+        Treat packaging, wrapper, release-contract, and artifact-verification
+        changes as supply-chain sensitive. Check bounded archive handling,
+        exact version/platform binding, lifecycle scripts, hashes, signals,
+        provenance authority, and fail-closed error paths.
+    - path: "{README.md,SECURITY.md,CONTRIBUTING.md,docs/**,.github/ISSUE_TEMPLATE/**}"
       instructions: >-
         Ensure privacy, supported-platform, and security claims exactly match the
-        implementation; flag overclaims and unsafe operational guidance.
+        implementation; flag overclaims, stale release examples, sensitive-data
+        requests, and unsafe operational guidance.
   auto_review:
     enabled: true
     auto_incremental_review: true

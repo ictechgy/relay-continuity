@@ -8,6 +8,15 @@ Managed-state security is currently supported on macOS and Linux only. On
 Windows, Relay refuses managed-state operations rather than falling back to
 path-based file access that could weaken symlink protections.
 
+## Supported versions
+
+Relay is currently prerelease software. Security fixes are provided only for
+the newest published prerelease and the current `main` branch; older release
+candidates are unsupported once a newer candidate is published. The published
+v0.2.0-rc.9 Linux asset requires glibc 2.39. The current release workflow moves
+future Linux x64 artifacts to musl and proves them in older runtime containers,
+but that does not retroactively change rc.9.
+
 SQLite evidence is kept in a user-local state directory outside the Git
 worktree. This is a deliberate trust boundary: a repository can control files
 below its root, but it cannot redirect evidence or SQLite sidecars through a
@@ -26,11 +35,37 @@ keeps running but writes no new snapshot evidence until a bounded no-follow
 refresh succeeds. Transient Git failures are retried. Only fixed degradation
 categories are stored or displayed; raw diagnostics and paths are not retained.
 
+Relay's background Git queries discard inherited repository, worktree, index,
+object-store, namespace, and transient `git -c` overrides before binding to the
+invocation worktree. They also disable optional index locks and lazy object
+fetches, so observation neither cross-binds evidence nor contends with an active
+Git writer or starts network retrieval. Automatic integration and daemon-control
+marker reads are no-follow, nonblocking, regular-file-only, single-link, and
+limited to 256 bytes; malformed state degrades to fixed unavailable output.
+
+`relay doctor` is diagnostic only. It uses bounded header/presence and managed
+state probes. Evidence inspection opens the state directory, repository state,
+and database through no-follow descriptors and validates the database header on
+the same opened file; it never uses the creating/recovery path and never repairs,
+quarantines, migrates, compacts, installs, enables, or removes state. Its output
+is an allowlist of fixed states and reason codes; it does not include raw
+filesystem/SQLite errors or workspace metadata.
+
+Repository CodeQL scans cover product code, release tooling, and workflows. The
+black-box `tests/` harness is excluded from static path-injection results because
+it intentionally drives hostile temporary paths; those tests remain mandatory
+in the compiler, Clippy, and CI gates.
+
 Tagged native builds receive GitHub artifact attestations scoped to the exact
 repository, release workflow, Git ref, and commit. npm packaging verifies those
 attestations first, then requires each bounded packed native payload to match
 the attested binary and its SHA-256. Package lifecycle scripts and bundled
 dependency metadata are rejected before staging.
+
+Tag-triggered artifact work is also bound to the exact Cargo SemVer before any
+archive or package job starts. The Linux x64 artifact is built for musl, rejected
+if it exposes dynamic ELF dependencies or GLIBC version strings, and executed
+inside pinned older Linux runtime images before attestation.
 
 ## Reporting a vulnerability
 

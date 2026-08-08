@@ -46,3 +46,18 @@ do not claim external publication, attestation, or package evidence that was
 not actually produced. Every behavior change requires regression coverage, and
 the final snapshot requires post-cleaner verification plus independent
 code-reviewer APPROVE and architect CLEAR verdicts.
+
+## G112-G115: Portable pilot readiness and selected roadmap hardening
+
+Implement the strict-consensus plan at
+`.omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md` and satisfy
+`.omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md`.
+Replace the confirmed GLIBC 2.39 Linux artifact contract with a proven musl
+artifact, bind release tags to Cargo SemVer before any authoritative artifact
+work, add global help/version/error behavior and a side-effect-free redacted
+doctor, and strengthen hostile AI-card, CI, dependency, review, and documentation
+gates. Preserve every prior privacy and fail-closed invariant. Do not add a new
+provider/context API, network runtime, telemetry, automatic repair, or provider
+launch. Tag creation, package publication/dist-tags, signing/notarization,
+service enablement, GA promotion, and branch/ruleset policy remain separately
+authorized external actions.
