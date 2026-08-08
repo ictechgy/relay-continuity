@@ -2507,6 +2507,7 @@ enum CardAudience {
 }
 const AI_INTEGRATION_CARD_MAX_WORDS: usize = 320;
 const AI_INTEGRATION_CARD_MAX_BYTES: usize = 4096;
+const OPERATOR_CARD_MAX_WORDS: usize = 800;
 fn card_for_audience_with_capture(
     root: &Path,
     c: &Connection,
@@ -2610,7 +2611,7 @@ fn card_for_audience_with_capture(
     let word_limit = if audience == CardAudience::AiIntegration {
         AI_INTEGRATION_CARD_MAX_WORDS
     } else {
-        800
+        OPERATOR_CARD_MAX_WORDS
     };
     if text.split_whitespace().count() > word_limit
         || (audience == CardAudience::AiIntegration && text.len() > AI_INTEGRATION_CARD_MAX_BYTES)
@@ -2635,6 +2636,23 @@ fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error
 }
 
 const HELP_TEXT: &str = "relay init | integration <codex <plan|install --apply|trust --apply|uninstall --apply>|status [provider]|plan <provider> <config-path>|initialize <provider> --apply|emit <provider>|service ...> | observe | watch [seconds] | daemon <start|stop|status> | shell <zsh|bash|fish> | adapter <provider> <metadata> | compact | explain | note <text> | status | resume | doctor [--json] | check <command>\n\nrelay doctor exits 0 only when every check passes; warnings or failures exit 1.";
+const PUBLIC_REPOSITORY_COMMANDS: &[&str] = &[
+    "init",
+    "integration",
+    "observe",
+    "watch",
+    "daemon",
+    "shell",
+    "adapter",
+    "compact",
+    "explain",
+    "note",
+    "status",
+    "resume",
+    "check",
+];
+const PUBLIC_GLOBAL_COMMANDS: &[&str] = &["doctor"];
+const INTERNAL_REPOSITORY_COMMANDS: &[&str] = &["record-check", "record-check-stdin"];
 const DOCTOR_OUTPUT_LIMIT_BYTES: usize = 4096;
 const DOCTOR_SERVICE_FILE_LIMIT_BYTES: u64 = 64 * 1024;
 
@@ -3432,7 +3450,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("relay {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
-    if cmd == "doctor" {
+    if PUBLIC_GLOBAL_COMMANDS.contains(&cmd.as_str()) {
         let json = match (a.next(), a.next()) {
             (None, None) => false,
             (Some(flag), None) if flag == "--json" => true,
@@ -3444,24 +3462,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    if !matches!(
-        cmd.as_str(),
-        "init"
-            | "integration"
-            | "observe"
-            | "watch"
-            | "daemon"
-            | "shell"
-            | "adapter"
-            | "compact"
-            | "explain"
-            | "note"
-            | "status"
-            | "resume"
-            | "check"
-            | "record-check"
-            | "record-check-stdin"
-    ) {
+    if !PUBLIC_REPOSITORY_COMMANDS.contains(&cmd.as_str())
+        && !INTERNAL_REPOSITORY_COMMANDS.contains(&cmd.as_str())
+    {
         return Err("Relay rejected an unknown command; run `relay help`".into());
     }
     let root = git_root(&env::current_dir()?)?;
@@ -3609,6 +3612,14 @@ mod tests {
         command
     }
 
+    struct UnitFixtureCleanup(PathBuf);
+
+    impl Drop for UnitFixtureCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn hash_is_stable() {
         assert_eq!(hash(b"x"), hash(b"x"));
@@ -3631,6 +3642,39 @@ mod tests {
         assert!(rules.ignores("config/.env.local"));
         assert!(rules.ignores(".relay"));
         assert!(rules.ignores(".git"));
+    }
+    #[test]
+    fn help_and_repository_command_allowlists_remain_in_sync() {
+        let documented = HELP_TEXT
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("relay ")
+            .unwrap()
+            .split(" | ")
+            .map(|entry| entry.split_whitespace().next().unwrap())
+            .collect::<Vec<_>>();
+        let accepted_public = PUBLIC_REPOSITORY_COMMANDS
+            .iter()
+            .chain(PUBLIC_GLOBAL_COMMANDS)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(documented.len(), accepted_public.len());
+        assert!(
+            documented
+                .iter()
+                .all(|command| accepted_public.contains(command))
+        );
+        assert!(
+            accepted_public
+                .iter()
+                .all(|command| documented.contains(command))
+        );
+        assert!(
+            INTERNAL_REPOSITORY_COMMANDS
+                .iter()
+                .all(|command| !documented.contains(command))
+        );
     }
     #[cfg(unix)]
     #[test]
@@ -4092,6 +4136,7 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(relay_dir(&root)).unwrap();
+        let _cleanup = UnitFixtureCleanup(root.clone());
         let instance_id = "unit-instance";
         fs::write(
             relay_dir(&root).join("daemon.pid"),
@@ -4132,8 +4177,6 @@ mod tests {
                 DoctorReason::CaptureInspectionFailed,
             )
         );
-
-        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn hook_command_shell_quoting_rejects_expansion_syntax() {
@@ -4271,6 +4314,7 @@ mod tests {
                 .is_some_and(|name| name.to_string_lossy().contains(repository_name_sentinel))
         );
         fs::create_dir_all(&root).unwrap();
+        let _cleanup = UnitFixtureCleanup(root.clone());
         assert!(
             test_git_command()
                 .arg("init")
@@ -4402,7 +4446,10 @@ mod tests {
 
         c.execute(
             "INSERT INTO annotations(snapshot,text) VALUES(?1,?2)",
-            params![snapshot(&root).unwrap(), "word ".repeat(801)],
+            params![
+                snapshot(&root).unwrap(),
+                "word ".repeat(OPERATOR_CARD_MAX_WORDS + 1)
+            ],
         )
         .unwrap();
         let error = card_for_audience(&root, &c, CardAudience::Operator).unwrap_err();
@@ -4414,8 +4461,6 @@ mod tests {
             read_managed_file(&root, &[".relay"], "current.md").unwrap(),
             operator.as_bytes()
         );
-
-        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn changed_worktree_is_stale() {
