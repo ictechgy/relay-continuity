@@ -1,1 +1,16 @@
-{"mode":"ultragoal","active":true,"current_phase":"executing","currentGoal":"G112","completedGoal":"G111","implementationSnapshot":"3bd67c5d3ed04bab389672389bf5ad542cb58a1f","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md","consensus":".omx/state/relay-portable-pilot-readiness-ralplan-consensus-20260806T171538Z.json","runtimeMode":"CODEX_APP_DEGRADED_NO_OMX","omxAvailable":false}
+{
+  "mode": "ultragoal",
+  "active": false,
+  "current_phase": "complete",
+  "completedGoal": "G115",
+  "implementationSnapshot": "702ae09e78c03d9590d316cc465b1bd30cb72a95",
+  "mergeSnapshot": "9c5dbc7e16438d2ba06c9220cd246aa532fa090b",
+  "plan": ".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md",
+  "testSpec": ".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md",
+  "consensus": ".omx/state/relay-portable-pilot-readiness-ralplan-consensus-20260806T171538Z.json",
+  "runtimeMode": "CODEX_APP_DEGRADED_NO_OMX",
+  "omxAvailable": false,
+  "codexGoalSnapshot": "update_goal returned complete; fresh get_goal returned null",
+  "codexTokensUsed": 704491,
+  "codexTimeUsedSeconds": 4660
+}

@@ -17,9 +17,9 @@
     {"id":"G107B","title":"Make daemon capture resilient and watcher load bounded","status":"complete","findings":["R-04","R-05"]},
     {"id":"G110","title":"Strengthen npm and release provenance plus distribution edge cases","status":"complete","findings":["R-08","R-09","R-10","R-12"]},
     {"id":"G111","title":"Prove final performance, privacy, compatibility, and review gates","status":"complete","findings":[]},
-    {"id":"G112","title":"Make Linux distribution portable and bind releases to exact Cargo SemVer","status":"in_progress","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"},
-    {"id":"G113","title":"Add global CLI contracts and a side-effect-free privacy-safe doctor","status":"pending","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"},
-    {"id":"G114","title":"Harden hostile context, CI, dependency review, and documentation contracts","status":"pending","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"},
-    {"id":"G115","title":"Prove the exact implementation head and close durable pilot-readiness gates","status":"pending","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"}
+    {"id":"G112","title":"Make Linux distribution portable and bind releases to exact Cargo SemVer","status":"complete","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"},
+    {"id":"G113","title":"Add global CLI contracts and a side-effect-free privacy-safe doctor","status":"complete","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"},
+    {"id":"G114","title":"Harden hostile context, CI, dependency review, and documentation contracts","status":"complete","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"},
+    {"id":"G115","title":"Prove the exact implementation head and close durable pilot-readiness gates","status":"complete","plan":".omx/plans/relay-portable-pilot-readiness-20260806T171538Z.md","testSpec":".omx/specs/relay-portable-pilot-readiness-test-spec-20260806T171538Z.md"}
   ]
 }
