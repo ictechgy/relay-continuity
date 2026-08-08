@@ -35,6 +35,14 @@ keeps running but writes no new snapshot evidence until a bounded no-follow
 refresh succeeds. Transient Git failures are retried. Only fixed degradation
 categories are stored or displayed; raw diagnostics and paths are not retained.
 
+Relay's background Git queries discard inherited repository, worktree, index,
+object-store, namespace, and transient `git -c` overrides before binding to the
+invocation worktree. They also disable optional index locks and lazy object
+fetches, so observation neither cross-binds evidence nor contends with an active
+Git writer or starts network retrieval. Automatic integration and daemon-control
+marker reads are no-follow, nonblocking, regular-file-only, single-link, and
+limited to 256 bytes; malformed state degrades to fixed unavailable output.
+
 `relay doctor` is diagnostic only. It uses bounded header/presence and managed
 state probes. Evidence inspection opens the state directory, repository state,
 and database through no-follow descriptors and validates the database header on

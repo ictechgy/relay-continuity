@@ -2,8 +2,13 @@ use rusqlite::Connection;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt, io::AsRawFd};
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{FileTypeExt, PermissionsExt},
+    io::AsRawFd,
+};
 use std::{
+    ffi::CString,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -1314,6 +1319,93 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
     assert!(!root.exists(), "integration emit fixture must be removed");
 }
 
+#[cfg(unix)]
+#[test]
+fn integration_emit_bounds_all_daemon_markers_without_disclosure_or_blocking() {
+    let root = git_fixture("integration-emit-daemon-marker-bound-test");
+    let _cleanup = FixtureCleanup(root.clone());
+    assert!(
+        run(&root, &["integration", "codex", "install", "--apply"])
+            .status
+            .success()
+    );
+    assert!(
+        run(&root, &["integration", "codex", "trust", "--apply"])
+            .status
+            .success()
+    );
+    let marker_secret = "ghp_daemon_marker_secret-/private/operator/path";
+    let pid_path = root.join(".relay/daemon.pid");
+    let ready_path = root.join(".relay/daemon.ready");
+    let degraded_path = root.join(".relay/daemon.degraded");
+    let unavailable = |output: &std::process::Output| {
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "Relay unavailable: codex local evidence unavailable\n"
+        );
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.len() <= 4096);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(marker_secret));
+    };
+    let emit = || {
+        run_with_timeout(
+            &root,
+            &["integration", "emit", "codex"],
+            Duration::from_secs(2),
+        )
+        .expect("bounded integration emit")
+    };
+
+    let oversized_pid = [marker_secret.as_bytes(), &vec![b'x'; 257]].concat();
+    fs::write(&pid_path, &oversized_pid).expect("write oversized PID marker");
+    unavailable(&emit());
+    assert_eq!(
+        fs::read(&pid_path).expect("retain PID marker"),
+        oversized_pid
+    );
+
+    let oversized_nonce = format!("{}\n{}", std::process::id(), "n".repeat(129)).into_bytes();
+    fs::write(&pid_path, &oversized_nonce).expect("write oversized nonce marker");
+    unavailable(&emit());
+    assert_eq!(
+        fs::read(&pid_path).expect("retain nonce marker"),
+        oversized_nonce
+    );
+
+    let nonce = "marker-fixture";
+    fs::write(&pid_path, format!("{}\n{nonce}", std::process::id()))
+        .expect("write valid daemon identity");
+    let oversized_ready = [marker_secret.as_bytes(), &vec![b'y'; 257]].concat();
+    fs::write(&ready_path, &oversized_ready).expect("write oversized ready marker");
+    unavailable(&emit());
+    assert_eq!(
+        fs::read(&ready_path).expect("retain ready marker"),
+        oversized_ready
+    );
+
+    fs::remove_file(&ready_path).expect("remove oversized ready marker");
+    let ready_fifo = CString::new(ready_path.as_os_str().as_bytes()).expect("encode FIFO path");
+    assert_eq!(unsafe { libc::mkfifo(ready_fifo.as_ptr(), 0o600) }, 0);
+    unavailable(&emit());
+    assert!(
+        fs::symlink_metadata(&ready_path)
+            .expect("inspect ready FIFO")
+            .file_type()
+            .is_fifo()
+    );
+
+    fs::remove_file(&ready_path).expect("remove ready FIFO");
+    fs::write(&ready_path, nonce).expect("write valid ready marker");
+    let oversized_degraded = [marker_secret.as_bytes(), &vec![b'z'; 257]].concat();
+    fs::write(&degraded_path, &oversized_degraded).expect("write oversized degraded marker");
+    unavailable(&emit());
+    assert_eq!(
+        fs::read(&degraded_path).expect("retain degraded marker"),
+        oversized_degraded
+    );
+}
+
 #[test]
 fn codex_hook_is_main_session_only_and_refuses_foreign_or_drifted_config() {
     let foreign_root = git_fixture("codex-hook-foreign-test");
@@ -2243,7 +2335,7 @@ fn nul_porcelain_preserves_space_paths_without_storing_source_content() {
 
 #[cfg(unix)]
 #[test]
-fn observe_disables_optional_git_locks_for_read_only_queries() {
+fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
     let root = git_fixture("git-optional-lock-test");
     let _cleanup = FixtureCleanup(root.clone());
     assert!(run(&root, &["init"]).status.success());
@@ -2260,7 +2352,7 @@ fn observe_disables_optional_git_locks_for_read_only_queries() {
     let wrapper = wrapper_directory.join("git");
     fs::write(
         &wrapper,
-        "#!/bin/sh\nif [ \"${GIT_OPTIONAL_LOCKS:-}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n",
+        "#!/bin/sh\nfor variable in GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_COMMON_DIR GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_DIR GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_GRAFT_FILE GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_NAMESPACE GIT_NO_REPLACE_OBJECTS GIT_OBJECT_DIRECTORY GIT_PREFIX GIT_REFERENCE_BACKEND GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_WORK_TREE; do\n  eval \"value=\\${$variable-}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${GIT_OPTIONAL_LOCKS:-}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${GIT_NO_LAZY_FETCH:-}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${GIT_ASKPASS:-}\" != \"preserve-sentinel\" ] || [ \"${GIT_CONFIG_GLOBAL:-}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n",
     )
     .expect("write Git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))
@@ -2269,14 +2361,45 @@ fn observe_disables_optional_git_locks_for_read_only_queries() {
         std::iter::once(wrapper_directory).chain(std::env::split_paths(&path)),
     )
     .expect("build wrapped PATH");
+    let preserved_config = root.join("preserved-global.gitconfig");
+    fs::write(&preserved_config, "[user]\n\tname = Relay Test\n")
+        .expect("write preserved Git config");
 
-    let observed = Command::new(env!("CARGO_BIN_EXE_relay"))
+    let mut relay = Command::new(env!("CARGO_BIN_EXE_relay"));
+    relay
         .arg("observe")
         .current_dir(&root)
         .env("RELAY_STATE_HOME", test_state_home(&root))
         .env("PATH", wrapped_path)
         .env("RELAY_TEST_REAL_GIT", real_git)
+        .env("RELAY_TEST_GIT_CONFIG_GLOBAL", &preserved_config)
+        .env("GIT_ASKPASS", "preserve-sentinel")
+        .env("GIT_CONFIG_GLOBAL", &preserved_config)
         .env_remove("GIT_OPTIONAL_LOCKS")
+        .env_remove("GIT_NO_LAZY_FETCH");
+    for variable in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_NAMESPACE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_REFERENCE_BACKEND",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ] {
+        relay.env(variable, "ambient-override");
+    }
+    let observed = relay
         .output()
         .expect("run Relay with Git environment guard");
     assert!(
@@ -2289,6 +2412,77 @@ fn observe_disables_optional_git_locks_for_read_only_queries() {
         "owner-sentinel",
         "Relay must not replace or remove another Git process's lock"
     );
+    let database = Connection::open(state_database(&root)).expect("open evidence database");
+    let queued_paths: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM event_paths WHERE path='queued.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count queued path evidence");
+    assert_eq!(
+        queued_paths, 1,
+        "disabling optional Git locks must not hide dirty-path evidence"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn ambient_git_environment_cannot_cross_bind_observation() {
+    let root = git_fixture("git-environment-root-test");
+    let foreign = git_fixture("git-environment-foreign-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
+    let _foreign_cleanup = FixtureCleanup(foreign.clone());
+    assert!(
+        Command::new("git")
+            .args(["switch", "-c", "poisoned"])
+            .current_dir(&foreign)
+            .status()
+            .expect("create foreign branch")
+            .success()
+    );
+    assert!(run(&root, &["init"]).status.success());
+    fs::write(root.join("local-only.txt"), "local evidence").expect("write local dirty path");
+    fs::write(foreign.join("foreign-only.txt"), "foreign evidence")
+        .expect("write foreign dirty path");
+    let nested = root.join("nested");
+    fs::create_dir(&nested).expect("create nested invocation directory");
+
+    let observed = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .arg("observe")
+        .current_dir(&nested)
+        .env("RELAY_STATE_HOME", test_state_home(&root))
+        .env("GIT_DIR", foreign.join(".git"))
+        .env("GIT_WORK_TREE", &root)
+        .env("GIT_INDEX_FILE", foreign.join(".git/index"))
+        .env("GIT_OBJECT_DIRECTORY", foreign.join(".git/objects"))
+        .env("GIT_COMMON_DIR", foreign.join(".git"))
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "status.showUntrackedFiles")
+        .env("GIT_CONFIG_VALUE_0", "no")
+        .output()
+        .expect("observe with hostile ambient Git environment");
+    assert!(
+        observed.status.success(),
+        "ambient Git environment redirected observation: {}",
+        String::from_utf8_lossy(&observed.stderr)
+    );
+    let card = String::from_utf8(observed.stdout).expect("operator card is UTF-8");
+    assert!(card.contains("Branch: main"), "{card}");
+    assert!(card.contains("local-only.txt"), "{card}");
+    assert!(!card.contains("poisoned"), "{card}");
+    assert!(!card.contains("foreign-only.txt"), "{card}");
+
+    let database = Connection::open(state_database(&root)).expect("open local evidence database");
+    let local_paths: i64 = database
+        .query_row(
+            "SELECT COUNT(*) FROM event_paths WHERE path='local-only.txt'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count local path evidence");
+    assert_eq!(local_paths, 1);
+    assert!(!foreign.join(".relay").exists());
 }
 
 #[test]

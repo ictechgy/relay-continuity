@@ -851,7 +851,8 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} integration {state}");
         return Ok(());
     }
-    if !daemon_active(root) {
+    let capture = daemon_state(root);
+    if capture == "unavailable" {
         println!("Relay unavailable: {provider} local evidence unavailable");
         return Ok(());
     }
@@ -859,7 +860,9 @@ fn integration_emit(root: &Path, provider: &str) -> Result<(), Box<dyn std::erro
         println!("Relay unavailable: {provider} local evidence unavailable");
         return Ok(());
     };
-    let Ok(context) = card_for_audience(root, &c, CardAudience::AiIntegration) else {
+    let Ok(context) =
+        card_for_audience_with_capture(root, &c, CardAudience::AiIntegration, &capture)
+    else {
         println!("Relay unavailable: {provider} local evidence unavailable");
         return Ok(());
     };
@@ -1482,9 +1485,35 @@ fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
 fn writer_busy(error: &dyn std::error::Error) -> bool {
     error.to_string() == "Relay writer is busy; retry without modifying evidence"
 }
+const GIT_OBSERVATION_ENV_REMOVALS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REFERENCE_BACKEND",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+];
 fn read_only_git_command(root: &Path) -> Command {
     let mut command = Command::new("git");
-    command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0");
+    command.current_dir(root);
+    for variable in GIT_OBSERVATION_ENV_REMOVALS {
+        command.env_remove(variable);
+    }
+    command
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1");
     command
 }
 fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1875,7 +1904,10 @@ fn dirty_entries_with_rules(
     root: &Path,
     ignore_rules: &IgnoreRules,
 ) -> Result<Vec<DirtyEntry>, Box<dyn std::error::Error>> {
-    let output = git_bytes(root, &["status", "--porcelain=v1", "-z"])?;
+    let output = git_bytes(
+        root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+    )?;
     let fields = output.split(|byte| *byte == 0).collect::<Vec<_>>();
     let mut index = 0;
     let mut entries = Vec::new();
@@ -2067,31 +2099,47 @@ fn daemon_reconcile(
         Err(error) => Err(error),
     }
 }
-fn read_pid(root: &Path) -> Option<u32> {
-    String::from_utf8(read_managed_file(root, &[".relay"], "daemon.pid").ok()?)
-        .ok()?
-        .lines()
-        .next()?
-        .parse()
-        .ok()
+const DAEMON_MARKER_FILE_LIMIT_BYTES: u64 = 256;
+const DAEMON_NONCE_MAX_BYTES: usize = 128;
+fn valid_daemon_nonce(nonce: &str) -> bool {
+    !nonce.is_empty()
+        && nonce.len() <= DAEMON_NONCE_MAX_BYTES
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
-fn read_nonce(root: &Path) -> Option<String> {
-    String::from_utf8(read_managed_file(root, &[".relay"], "daemon.pid").ok()?)
-        .ok()?
-        .lines()
-        .nth(1)
-        .map(str::to_owned)
+fn parse_daemon_identity(bytes: &[u8]) -> Option<(u32, String)> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut lines = text.lines();
+    let pid = lines.next()?.parse().ok()?;
+    let nonce = lines.next()?;
+    if lines.next().is_some() || !valid_daemon_nonce(nonce) {
+        return None;
+    }
+    Some((pid, nonce.to_owned()))
+}
+fn read_daemon_identity(root: &Path) -> Option<(u32, String)> {
+    let bytes = read_managed_file_bounded(
+        root,
+        &[".relay"],
+        "daemon.pid",
+        DAEMON_MARKER_FILE_LIMIT_BYTES,
+    )
+    .ok()?;
+    parse_daemon_identity(&bytes)
 }
 fn write_daemon_degraded(
     root: &Path,
     nonce: &str,
     reason: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !matches!(
-        reason,
-        "git-unavailable" | "repository-control-unavailable" | "watcher-polling"
-    ) {
-        return Err("Relay rejected an unknown daemon degradation state".into());
+    if !valid_daemon_nonce(nonce)
+        || !matches!(
+            reason,
+            "git-unavailable" | "repository-control-unavailable" | "watcher-polling"
+        )
+    {
+        return Err("Relay rejected an invalid daemon degradation state".into());
     }
     atomic_replace_managed(
         root,
@@ -2107,19 +2155,32 @@ fn clear_daemon_degraded(root: &Path) -> Result<(), Box<dyn std::error::Error>> 
         Err(error) => Err(error),
     }
 }
-fn daemon_degraded_reason(root: &Path) -> Option<&'static str> {
-    let text =
-        String::from_utf8(read_managed_file(root, &[".relay"], "daemon.degraded").ok()?).ok()?;
+fn daemon_degraded_reason(root: &Path, nonce: &str) -> Result<Option<&'static str>, ()> {
+    let bytes = match read_managed_file_bounded(
+        root,
+        &[".relay"],
+        "daemon.degraded",
+        DAEMON_MARKER_FILE_LIMIT_BYTES,
+    ) {
+        Err(error) if is_not_found(error.as_ref()) => return Ok(None),
+        Err(_) => return Err(()),
+        Ok(bytes) => bytes,
+    };
+    let text = String::from_utf8(bytes).map_err(|_| ())?;
     let mut lines = text.lines();
-    if lines.next()? != read_nonce(root)? {
-        return None;
+    if lines.next() != Some(nonce) {
+        return Err(());
     }
-    match lines.next()? {
-        "git-unavailable" => Some("git-unavailable"),
-        "repository-control-unavailable" => Some("repository-control-unavailable"),
-        "watcher-polling" => Some("watcher-polling"),
-        _ => None,
+    let reason = match lines.next() {
+        Some("git-unavailable") => "git-unavailable",
+        Some("repository-control-unavailable") => "repository-control-unavailable",
+        Some("watcher-polling") => "watcher-polling",
+        _ => return Err(()),
+    };
+    if lines.next().is_some() {
+        return Err(());
     }
+    Ok(Some(reason))
 }
 #[cfg(unix)]
 fn process_active(pid: u32) -> bool {
@@ -2140,24 +2201,35 @@ fn process_active(pid: u32) -> bool {
         .map(|status| status.success())
         .unwrap_or(false)
 }
+fn active_daemon_nonce(root: &Path) -> Option<String> {
+    let (pid, nonce) = read_daemon_identity(root)?;
+    if process_active(pid)
+        && read_managed_file_bounded(
+            root,
+            &[".relay"],
+            "daemon.ready",
+            DAEMON_MARKER_FILE_LIMIT_BYTES,
+        )
+        .ok()
+        .as_deref()
+            == Some(nonce.as_bytes())
+    {
+        Some(nonce)
+    } else {
+        None
+    }
+}
 fn daemon_active(root: &Path) -> bool {
-    let (Some(pid), Some(nonce)) = (read_pid(root), read_nonce(root)) else {
-        return false;
-    };
-    process_active(pid)
-        && read_managed_file(root, &[".relay"], "daemon.ready")
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .as_deref()
-            == Some(nonce.as_str())
+    active_daemon_nonce(root).is_some()
 }
 fn daemon_state(root: &Path) -> String {
-    if daemon_active(root) {
-        daemon_degraded_reason(root)
-            .map(|reason| format!("degraded ({reason})"))
-            .unwrap_or_else(|| "active".to_owned())
-    } else {
-        "unavailable".to_owned()
+    let Some(nonce) = active_daemon_nonce(root) else {
+        return "unavailable".to_owned();
+    };
+    match daemon_degraded_reason(root, &nonce) {
+        Ok(Some(reason)) => format!("degraded ({reason})"),
+        Ok(None) => "active".to_owned(),
+        Err(()) => "unavailable".to_owned(),
     }
 }
 fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -2209,16 +2281,15 @@ fn start_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Err("Relay daemon did not become ready".into())
 }
 fn stop_daemon(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    if read_pid(root).is_none() {
+    if read_daemon_identity(root).is_none() {
         return Err("Relay daemon is not running".into());
     }
-    if !daemon_active(root) {
+    let Some(nonce) = active_daemon_nonce(root) else {
         let _ = remove_managed_file(root, &[".relay"], "daemon.pid");
         let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
         let _ = remove_managed_file(root, &[".relay"], "daemon.degraded");
         return Err("Relay daemon state was stale; no process was stopped".into());
-    }
-    let nonce = read_nonce(root).ok_or("Relay daemon nonce is unavailable")?;
+    };
     atomic_replace_managed(root, &[".relay"], "daemon.stop", nonce.as_bytes())?;
     for _ in 0..75 {
         if !daemon_active(root) {
@@ -2246,6 +2317,9 @@ fn event_is_relevant(root: &Path, event: &Event, ignore_rules: &IgnoreRules) -> 
     })
 }
 fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !valid_daemon_nonce(nonce) {
+        return Err("Relay rejected an invalid managed daemon nonce".into());
+    }
     let mut ignore_rules = IgnoreRules::default();
     let (tx, rx) = channel();
     let watcher = match RecommendedWatcher::new(tx, Config::default()) {
@@ -2262,11 +2336,15 @@ fn run_daemon(root: &Path, c: &Connection, nonce: &str) -> Result<(), Box<dyn st
     let mut last_reconcile = Instant::now();
     let mut pending: Option<Instant> = None;
     loop {
-        if read_managed_file(root, &[".relay"], "daemon.stop")
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-            .as_deref()
-            == Some(nonce)
+        if read_managed_file_bounded(
+            root,
+            &[".relay"],
+            "daemon.stop",
+            DAEMON_MARKER_FILE_LIMIT_BYTES,
+        )
+        .ok()
+        .as_deref()
+            == Some(nonce.as_bytes())
         {
             let _ = remove_managed_file(root, &[".relay"], "daemon.ready");
             let _ = remove_managed_file(root, &[".relay"], "daemon.stop");
@@ -2429,10 +2507,11 @@ enum CardAudience {
 }
 const AI_INTEGRATION_CARD_MAX_WORDS: usize = 320;
 const AI_INTEGRATION_CARD_MAX_BYTES: usize = 4096;
-fn card_for_audience(
+fn card_for_audience_with_capture(
     root: &Path,
     c: &Connection,
     audience: CardAudience,
+    capture: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let ignore_rules = IgnoreRules::load(root)?;
     let dirty_entries = dirty_entries_with_rules(root, &ignore_rules)?;
@@ -2515,7 +2594,7 @@ fn card_for_audience(
     };
     let text = format!(
         "# Relay context\n\nSTATUS: {state}\nCapture: {}\nSnapshot: {now}\n{repository_policy}Branch: {branch}\nChanged: {}\nChecks: {}\nSemantic context: unknown (no vendor adapter required)\nNote (unverified): {note}\n\n{}\n",
-        daemon_state(root),
+        capture,
         if changed.is_empty() { "none" } else { &changed },
         if broken {
             "BROKEN evidence exists"
@@ -2542,6 +2621,14 @@ fn card_for_audience(
         atomic_replace_managed(root, &[".relay"], "current.md", text.as_bytes())?;
     }
     Ok(text)
+}
+fn card_for_audience(
+    root: &Path,
+    c: &Connection,
+    audience: CardAudience,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let capture = daemon_state(root);
+    card_for_audience_with_capture(root, c, audience, &capture)
 }
 fn card(root: &Path, c: &Connection) -> Result<String, Box<dyn std::error::Error>> {
     card_for_audience(root, c, CardAudience::Operator)
@@ -3027,7 +3114,12 @@ fn doctor_integration_check(name: DoctorCheckName, reason: DoctorReason) -> Doct
 fn doctor_capture_without_pid(root: &Path) -> DoctorCheck {
     let mut residue = false;
     for file_name in ["daemon.ready", "daemon.degraded", "daemon.stop"] {
-        match read_managed_file_bounded(root, &[".relay"], file_name, 256) {
+        match read_managed_file_bounded(
+            root,
+            &[".relay"],
+            file_name,
+            DAEMON_MARKER_FILE_LIMIT_BYTES,
+        ) {
             Err(error) if is_not_found(error.as_ref()) => {}
             Ok(_) => residue = true,
             Err(_) => {
@@ -3055,7 +3147,12 @@ fn doctor_capture_without_pid(root: &Path) -> DoctorCheck {
 }
 
 fn doctor_capture_check(root: &Path) -> DoctorCheck {
-    let pid_bytes = match read_managed_file_bounded(root, &[".relay"], "daemon.pid", 256) {
+    let pid_bytes = match read_managed_file_bounded(
+        root,
+        &[".relay"],
+        "daemon.pid",
+        DAEMON_MARKER_FILE_LIMIT_BYTES,
+    ) {
         Err(error) if is_not_found(error.as_ref()) => {
             return doctor_capture_without_pid(root);
         }
@@ -3068,34 +3165,13 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
         }
         Ok(bytes) => bytes,
     };
-    let Some(pid_text) = String::from_utf8(pid_bytes).ok() else {
+    let Some((pid, nonce)) = parse_daemon_identity(&pid_bytes) else {
         return DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Failure,
             DoctorReason::CaptureInspectionFailed,
         );
     };
-    let mut lines = pid_text.lines();
-    let pid = lines.next().and_then(|line| line.parse::<u32>().ok());
-    let nonce = lines.next();
-    if lines.next().is_some()
-        || pid.is_none()
-        || nonce.is_none_or(|nonce| {
-            nonce.is_empty()
-                || nonce.len() > 128
-                || !nonce
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-    {
-        return DoctorCheck::new(
-            DoctorCheckName::Capture,
-            DoctorCheckState::Failure,
-            DoctorReason::CaptureInspectionFailed,
-        );
-    }
-    let pid = pid.expect("validated PID");
-    let nonce = nonce.expect("validated nonce");
     if !process_active(pid) {
         return DoctorCheck::new(
             DoctorCheckName::Capture,
@@ -3103,7 +3179,12 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
             DoctorReason::CaptureStale,
         );
     }
-    match read_managed_file_bounded(root, &[".relay"], "daemon.ready", 256) {
+    match read_managed_file_bounded(
+        root,
+        &[".relay"],
+        "daemon.ready",
+        DAEMON_MARKER_FILE_LIMIT_BYTES,
+    ) {
         Err(error) if is_not_found(error.as_ref()) => {
             return DoctorCheck::new(
                 DoctorCheckName::Capture,
@@ -3118,25 +3199,23 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
                 DoctorReason::CaptureInspectionFailed,
             );
         }
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(ready) if ready == nonce => {}
-            Ok(_) => {
+        Ok(bytes) => match bytes.as_slice() {
+            ready if ready == nonce.as_bytes() => {}
+            _ => {
                 return DoctorCheck::new(
                     DoctorCheckName::Capture,
                     DoctorCheckState::Warning,
                     DoctorReason::CaptureStale,
                 );
             }
-            Err(_) => {
-                return DoctorCheck::new(
-                    DoctorCheckName::Capture,
-                    DoctorCheckState::Failure,
-                    DoctorReason::CaptureInspectionFailed,
-                );
-            }
         },
     }
-    let degraded = match read_managed_file_bounded(root, &[".relay"], "daemon.degraded", 256) {
+    let degraded = match read_managed_file_bounded(
+        root,
+        &[".relay"],
+        "daemon.degraded",
+        DAEMON_MARKER_FILE_LIMIT_BYTES,
+    ) {
         Err(error) if is_not_found(error.as_ref()) => None,
         Err(_) => {
             return DoctorCheck::new(
