@@ -17,6 +17,35 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+const GIT_REPOSITORY_ENV_REMOVALS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REFERENCE_BACKEND",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+];
+
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    for variable in GIT_REPOSITORY_ENV_REMOVALS {
+        command.env_remove(variable);
+    }
+    command
+}
+
 #[cfg(unix)]
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -36,7 +65,7 @@ fn state_database_at(root: &Path, base: &Path) -> PathBuf {
 }
 
 fn test_repository_root(cwd: &Path) -> Option<PathBuf> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()
@@ -49,6 +78,44 @@ fn test_repository_root(cwd: &Path) -> Option<PathBuf> {
             .expect("Git root is UTF-8 in test fixtures")
             .trim(),
     ))
+}
+
+#[cfg(unix)]
+fn drain_pipe<R>(mut pipe: R) -> thread::JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: std::io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut pipe, &mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+#[cfg(unix)]
+fn join_pipe(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    name: &str,
+) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| format!("{name} reader panicked"))?
+        .map_err(|error| format!("read relay {name}: {error}"))
+}
+
+#[cfg(unix)]
+fn collect_child_output(
+    status: std::process::ExitStatus,
+    stdout_reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<std::process::Output, String> {
+    let stdout = join_pipe(stdout_reader, "stdout");
+    let stderr = join_pipe(stderr_reader, "stderr");
+    Ok(std::process::Output {
+        status,
+        stdout: stdout?,
+        stderr: stderr?,
+    })
 }
 
 fn test_state_home(cwd: &Path) -> PathBuf {
@@ -82,27 +149,29 @@ fn run_with_timeout(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("start relay: {error}"))?;
+    let stdout_reader = drain_pipe(child.stdout.take().ok_or("relay stdout was not piped")?);
+    let stderr_reader = drain_pipe(child.stderr.take().ok_or("relay stderr was not piped")?);
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                return child
-                    .wait_with_output()
-                    .map_err(|error| format!("collect relay output: {error}"));
-            }
+            Ok(Some(status)) => return collect_child_output(status, stdout_reader, stderr_reader),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
                 let kill_error = child.kill().err();
                 let reap_error = child.wait().err();
+                let stdout_error = join_pipe(stdout_reader, "stdout").err();
+                let stderr_error = join_pipe(stderr_reader, "stderr").err();
                 return Err(format!(
-                    "relay exceeded {timeout:?}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                    "relay exceeded {timeout:?}; kill_error={kill_error:?}; reap_error={reap_error:?}; stdout_error={stdout_error:?}; stderr_error={stderr_error:?}"
                 ));
             }
             Err(error) => {
                 let kill_error = child.kill().err();
                 let reap_error = child.wait().err();
+                let stdout_error = join_pipe(stdout_reader, "stdout").err();
+                let stderr_error = join_pipe(stderr_reader, "stderr").err();
                 return Err(format!(
-                    "inspect relay child: {error}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                    "inspect relay child: {error}; kill_error={kill_error:?}; reap_error={reap_error:?}; stdout_error={stdout_error:?}; stderr_error={stderr_error:?}"
                 ));
             }
         }
@@ -143,6 +212,33 @@ fn wait_for_path_while_child_runs(
         }
     }
 }
+#[cfg(unix)]
+fn wait_for_child_exit(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let kill_error = child.kill().err();
+                let reap_error = child.wait().err();
+                return Err(format!(
+                    "service runner did not exit within {timeout:?}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                ));
+            }
+            Err(error) => {
+                let kill_error = child.kill().err();
+                let reap_error = child.wait().err();
+                return Err(format!(
+                    "inspect service runner exit: {error}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                ));
+            }
+        }
+    }
+}
 fn run_from(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
@@ -162,10 +258,13 @@ fn run_with_home(root: &Path, args: &[&str], home: &Path) -> std::process::Outpu
         .expect("run relay with isolated home")
 }
 fn run_with_state_home(root: &Path, args: &[&str], state_home: &Path) -> std::process::Output {
+    let user_home = state_home.join("user-home");
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
         .current_dir(root)
         .env("RELAY_STATE_HOME", state_home)
+        .env("HOME", &user_home)
+        .env("XDG_CONFIG_HOME", user_home.join(".config"))
         .output()
         .expect("run relay with isolated state home")
 }
@@ -263,7 +362,7 @@ fn git_fixture(label: &str) -> PathBuf {
     ));
     fs::create_dir_all(&root).expect("create fixture");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["init", "-b", "main"])
             .current_dir(&root)
             .status()
@@ -272,7 +371,7 @@ fn git_fixture(label: &str) -> PathBuf {
     );
     fs::write(root.join("tracked.txt"), "initial").expect("fixture file");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["add", "tracked.txt"])
             .current_dir(&root)
             .status()
@@ -280,7 +379,7 @@ fn git_fixture(label: &str) -> PathBuf {
             .success()
     );
     assert!(
-        Command::new("git")
+        git_command()
             .args([
                 "-c",
                 "user.name=Relay",
@@ -298,13 +397,24 @@ fn git_fixture(label: &str) -> PathBuf {
     root
 }
 
-#[cfg(unix)]
 struct FixtureCleanup(PathBuf);
 
-#[cfg(unix)]
 impl Drop for FixtureCleanup {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(unix)]
+struct PermissionRestore {
+    path: PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl Drop for PermissionRestore {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.mode));
     }
 }
 
@@ -368,11 +478,11 @@ fn help_runs_without_creating_evidence_outside_a_git_worktree() {
             .as_nanos()
     ));
     fs::create_dir_all(&root).expect("create fixture");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let output = run(&root, &["help"]);
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("relay init"));
     assert!(!root.join(".relay").exists());
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[test]
@@ -385,6 +495,7 @@ fn global_help_version_and_unknown_commands_never_require_or_mutate_a_repository
             .as_nanos()
     ));
     fs::create_dir_all(&root).expect("create fixture");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = root.join("state-home-must-not-exist");
 
     for alias in ["help", "-h", "--help"] {
@@ -411,7 +522,6 @@ fn global_help_version_and_unknown_commands_never_require_or_mutate_a_repository
     assert!(!extra_help.status.success());
     assert!(!root.join(".relay").exists());
     assert!(!state_home.exists());
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[cfg(target_os = "linux")]
@@ -484,6 +594,7 @@ fn doctor_json_is_parseable_bounded_and_side_effect_free_outside_git() {
             .as_nanos()
     ));
     fs::create_dir_all(&root).expect("create fixture");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = root.join("state-home-must-not-exist");
     let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
     assert_eq!(output.status.code(), Some(1));
@@ -499,13 +610,13 @@ fn doctor_json_is_parseable_bounded_and_side_effect_free_outside_git() {
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("usage: relay doctor [--json]"));
     assert!(!state_home.exists());
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[cfg(unix)]
 #[test]
 fn doctor_and_unknown_commands_do_not_initialize_a_fresh_git_repository() {
     let root = git_fixture("doctor-fresh-repository-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = fs::canonicalize(std::env::temp_dir())
         .expect("canonical temporary directory")
         .join(format!(
@@ -515,6 +626,7 @@ fn doctor_and_unknown_commands_do_not_initialize_a_fresh_git_repository() {
                 .expect("clock")
                 .as_nanos()
         ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
     assert!(!state_home.exists());
 
     let doctor = run_with_state_home(&root, &["doctor", "--json"], &state_home);
@@ -529,13 +641,13 @@ fn doctor_and_unknown_commands_do_not_initialize_a_fresh_git_repository() {
     assert!(!unknown.status.success());
     assert!(!root.join(".relay").exists());
     assert!(!state_home.exists());
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[cfg(unix)]
 #[test]
 fn doctor_reports_a_healthy_initialized_repository_without_mutating_state() {
     let root = git_fixture("doctor-healthy-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = fs::canonicalize(std::env::temp_dir())
         .expect("canonical temporary directory")
         .join(format!(
@@ -545,6 +657,7 @@ fn doctor_reports_a_healthy_initialized_repository_without_mutating_state() {
                 .expect("clock")
                 .as_nanos()
         ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
     let initialized = run_with_state_home(&root, &["init"], &state_home);
     assert!(
         initialized.status.success(),
@@ -576,8 +689,6 @@ fn doctor_reports_a_healthy_initialized_repository_without_mutating_state() {
         directory_entry_names(database.parent().expect("evidence parent")),
         entries_before
     );
-    fs::remove_dir_all(root).expect("remove fixture");
-    fs::remove_dir_all(state_home).expect("remove isolated state");
 }
 
 #[cfg(unix)]
@@ -586,6 +697,7 @@ fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
     use std::os::unix::fs::symlink;
 
     let root = git_fixture("doctor-hostile-evidence-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = fs::canonicalize(std::env::temp_dir())
         .expect("canonical temporary directory")
         .join(format!(
@@ -595,6 +707,7 @@ fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
                 .expect("clock")
                 .as_nanos()
         ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
     let initialized = run_with_state_home(&root, &["init"], &state_home);
     assert!(
         initialized.status.success(),
@@ -669,15 +782,14 @@ fn doctor_fails_closed_for_foreign_and_symlinked_evidence_without_repair() {
         "PRECIOUS-STATE"
     );
 
-    fs::remove_dir_all(root).expect("remove fixture");
     fs::remove_file(repository_state).expect("remove repository state symlink");
-    fs::remove_dir_all(state_home).expect("remove isolated state");
 }
 
 #[cfg(unix)]
 #[test]
 fn corrupt_database_is_preserved_before_safe_recovery() {
     let root = git_fixture("corrupt-database-recovery-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let initialized = run(&root, &["init"]);
     assert!(
         initialized.status.success(),
@@ -730,8 +842,6 @@ fn corrupt_database_is_preserved_before_safe_recovery() {
             .any(|name| { name.starts_with("evidence.sqlite.corrupt-") && name.ends_with("-shm") }),
         "preserve the stale shared-memory sidecar"
     );
-
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[cfg(unix)]
@@ -743,6 +853,7 @@ fn doctor_distinguishes_managed_directory_open_failures_from_unsafe_paths() {
         return;
     }
     let root = git_fixture("doctor-managed-open-failure-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = fs::canonicalize(std::env::temp_dir())
         .expect("canonical temporary directory")
         .join(format!(
@@ -752,12 +863,17 @@ fn doctor_distinguishes_managed_directory_open_failures_from_unsafe_paths() {
                 .expect("clock")
                 .as_nanos()
         ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
     assert!(
         run_with_state_home(&root, &["init"], &state_home)
             .status
             .success()
     );
     let managed = root.join(".relay");
+    let _permission_restore = PermissionRestore {
+        path: managed.clone(),
+        mode: 0o700,
+    };
     fs::set_permissions(&managed, fs::Permissions::from_mode(0o000))
         .expect("make managed directory unreadable");
     let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
@@ -770,9 +886,6 @@ fn doctor_distinguishes_managed_directory_open_failures_from_unsafe_paths() {
         "\"name\":\"managed_state\",\"state\":\"fail\",\"reason\":\"managed-state-inspection-failed\""
     ));
     assert!(body.contains("\"reason\":\"managed-state-unavailable\""));
-
-    fs::remove_dir_all(root).expect("remove fixture");
-    fs::remove_dir_all(state_home).expect("remove isolated state");
 }
 
 #[cfg(unix)]
@@ -781,6 +894,7 @@ fn doctor_reports_stale_and_hostile_daemon_residue_without_mutation() {
     use std::os::unix::fs::symlink;
 
     let root = git_fixture("doctor-daemon-residue-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = fs::canonicalize(std::env::temp_dir())
         .expect("canonical temporary directory")
         .join(format!(
@@ -790,6 +904,7 @@ fn doctor_reports_stale_and_hostile_daemon_residue_without_mutation() {
                 .expect("clock")
                 .as_nanos()
         ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
     let initialized = run_with_state_home(&root, &["init"], &state_home);
     assert!(initialized.status.success());
     let database = state_database_at(&root, &state_home);
@@ -865,9 +980,6 @@ fn doctor_reports_stale_and_hostile_daemon_residue_without_mutation() {
         fs::read(&database).expect("re-read evidence after hostile probe"),
         database_before
     );
-
-    fs::remove_dir_all(root).expect("remove fixture");
-    fs::remove_dir_all(state_home).expect("remove isolated state");
 }
 
 #[cfg(unix)]
@@ -876,6 +988,7 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
     use std::os::unix::fs::symlink;
 
     let root = git_fixture("doctor-integration-drift-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let state_home = fs::canonicalize(std::env::temp_dir())
         .expect("canonical temporary directory")
         .join(format!(
@@ -885,6 +998,7 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
                 .expect("clock")
                 .as_nanos()
         ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
     let initialized = run_with_state_home(&root, &["init"], &state_home);
     assert!(
         initialized.status.success(),
@@ -951,11 +1065,20 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
     fs::remove_file(&owned_path).expect("remove owned symlink");
     fs::remove_file(&owned_target).expect("remove owned target");
 
-    fs::write(&owned_path, vec![b'x'; 64 * 1024 + 1]).expect("write oversized owned fixture");
+    let oversized_secret = "ghp_oversized_owned_secret-/private/operator/path";
+    let oversized_fixture = format!("{oversized_secret}{}", "x".repeat(64 * 1024 + 1));
+    fs::write(&owned_path, oversized_fixture).expect("write oversized owned fixture");
     let oversized_owned = run_with_state_home(&root, &["doctor", "--json"], &state_home);
     assert_eq!(oversized_owned.status.code(), Some(1));
     let body = assert_doctor_json(&oversized_owned);
     assert!(body.contains("integration-inspection-failed"));
+    assert!(!body.contains(oversized_secret));
+    let oversized_owned_text = run_with_state_home(&root, &["doctor"], &state_home);
+    assert_eq!(oversized_owned_text.status.code(), Some(1));
+    let text = String::from_utf8(oversized_owned_text.stdout).expect("doctor text is UTF-8");
+    assert!(text.len() <= 4096, "doctor text output must remain bounded");
+    assert!(text.contains("integration_codex: fail (integration-inspection-failed)"));
+    assert!(!text.contains(oversized_secret));
     fs::write(&owned_path, &owned).expect("restore owned fixture");
 
     let hook_target = root.join("ghp_manifest_hook_symlink_target");
@@ -1027,6 +1150,7 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
             .expect("clock")
             .as_nanos()
     ));
+    let _outside_cleanup = FixtureCleanup(outside.clone());
     fs::create_dir_all(&outside).expect("create hostile outside directory");
     let sentinel = outside.join("ghp_manifest_secret");
     fs::write(&sentinel, "PRECIOUS").expect("write outside sentinel");
@@ -1041,10 +1165,6 @@ fn doctor_reports_integration_drift_and_hostile_paths_without_disclosure_or_muta
         fs::read_to_string(&sentinel).expect("read outside sentinel"),
         "PRECIOUS"
     );
-
-    fs::remove_dir_all(root).expect("remove fixture");
-    fs::remove_dir_all(state_home).expect("remove isolated state");
-    fs::remove_dir_all(outside).expect("remove outside fixture");
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1058,6 +1178,7 @@ fn doctor_checks_the_user_service_with_bounded_no_follow_reads_and_no_mutation()
     let (kind, relative_service_dir) = ("systemd", ".config/systemd/user");
 
     let root = git_fixture("doctor-service-test");
+    let _root_cleanup = FixtureCleanup(root.clone());
     let canonical_temp =
         fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory");
     let unique = SystemTime::now()
@@ -1066,6 +1187,8 @@ fn doctor_checks_the_user_service_with_bounded_no_follow_reads_and_no_mutation()
         .as_nanos();
     let state_home = canonical_temp.join(format!("relay-doctor-service-state-{unique}"));
     let user_home = canonical_temp.join(format!("relay-doctor-service-home-{unique}"));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
+    let _user_home_cleanup = FixtureCleanup(user_home.clone());
     fs::create_dir_all(&user_home).expect("create isolated user home");
 
     let initialized = run_with_state_and_user_home(&root, &["init"], &state_home, &user_home);
@@ -1186,10 +1309,6 @@ fn doctor_checks_the_user_service_with_bounded_no_follow_reads_and_no_mutation()
     );
     fs::remove_file(&service_dir).expect("remove service parent symlink");
     fs::remove_dir_all(&real_service_dir).expect("remove service directory target");
-
-    fs::remove_dir_all(root).expect("remove fixture");
-    fs::remove_dir_all(state_home).expect("remove isolated state");
-    fs::remove_dir_all(user_home).expect("remove isolated user home");
 }
 
 #[test]
@@ -1799,7 +1918,11 @@ fn service_runner_bootstraps_a_fresh_git_checkout() {
         let _ = child.wait();
         panic!("stop failed: {}", String::from_utf8_lossy(&stopped.stderr));
     }
-    assert!(child.wait().expect("wait service runner").success());
+    assert!(
+        wait_for_child_exit(&mut child, Duration::from_secs(30))
+            .expect("wait for bounded service runner exit")
+            .success()
+    );
 }
 
 #[test]
@@ -1813,7 +1936,7 @@ fn unborn_repository_bootstraps_and_captures_the_first_commit() {
     ));
     fs::create_dir_all(&root).expect("create unborn fixture");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["init", "-b", "main"])
             .current_dir(&root)
             .status()
@@ -1825,7 +1948,7 @@ fn unborn_repository_bootstraps_and_captures_the_first_commit() {
 
     fs::write(root.join("first.txt"), "first content").expect("write first file");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["add", "first.txt"])
             .current_dir(&root)
             .status()
@@ -1833,7 +1956,7 @@ fn unborn_repository_bootstraps_and_captures_the_first_commit() {
             .success()
     );
     assert!(
-        Command::new("git")
+        git_command()
             .args([
                 "-c",
                 "user.name=Relay",
@@ -1879,7 +2002,7 @@ fn nested_changes_are_captured_by_bounded_root_watch_and_polling() {
     fs::create_dir_all(root.join("nested")).expect("create nested directory");
     fs::write(root.join("nested/tracked.txt"), "initial").expect("write nested fixture");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["add", "nested/tracked.txt"])
             .current_dir(&root)
             .status()
@@ -1887,7 +2010,7 @@ fn nested_changes_are_captured_by_bounded_root_watch_and_polling() {
             .success()
     );
     assert!(
-        Command::new("git")
+        git_command()
             .args([
                 "-c",
                 "user.name=Relay",
@@ -2003,7 +2126,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     ));
     fs::create_dir_all(&root).expect("create fixture");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["init", "-b", "main"])
             .current_dir(&root)
             .status()
@@ -2013,7 +2136,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     fs::write(root.join("tracked.txt"), "initial").expect("fixture file");
     fs::write(root.join(".relayignore"), "generated/\n").expect("ignore fixture");
     assert!(
-        Command::new("git")
+        git_command()
             .args(["add", "."])
             .current_dir(&root)
             .status()
@@ -2021,7 +2144,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .success()
     );
     assert!(
-        Command::new("git")
+        git_command()
             .args([
                 "-c",
                 "user.name=Relay",
@@ -2091,7 +2214,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     drop(database);
 
     assert!(
-        Command::new("git")
+        git_command()
             .args(["add", "tracked.txt"])
             .current_dir(&root)
             .status()
@@ -2099,7 +2222,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .success()
     );
     assert!(
-        Command::new("git")
+        git_command()
             .args([
                 "-c",
                 "user.name=Relay",
@@ -2137,7 +2260,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     assert!(transition_seen, "HEAD transition was not observed");
 
     assert!(
-        Command::new("git")
+        git_command()
             .args(["checkout", "-b", "relay-branch-transition"])
             .current_dir(&root)
             .status()
@@ -2167,7 +2290,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
     assert!(branch_seen, "branch transition was not observed");
 
     assert!(
-        Command::new("git")
+        git_command()
             .args([
                 "remote",
                 "add",
@@ -2180,7 +2303,7 @@ fn daemon_debounces_file_bursts_and_reports_capture_lifecycle() {
             .success()
     );
     assert!(
-        Command::new("git")
+        git_command()
             .args(["checkout", "-b", "private/ghp_fake_branch_secret"])
             .current_dir(&root)
             .status()
@@ -2434,7 +2557,7 @@ fn ambient_git_environment_cannot_cross_bind_observation() {
     let _root_cleanup = FixtureCleanup(root.clone());
     let _foreign_cleanup = FixtureCleanup(foreign.clone());
     assert!(
-        Command::new("git")
+        git_command()
             .args(["switch", "-c", "poisoned"])
             .current_dir(&foreign)
             .status()

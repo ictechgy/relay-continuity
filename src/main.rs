@@ -2621,7 +2621,7 @@ fn card_for_audience_with_capture(
     if text.split_whitespace().count() > word_limit
         || (audience == CardAudience::AiIntegration && text.len() > AI_INTEGRATION_CARD_MAX_BYTES)
     {
-        return Err(rusqlite::Error::InvalidQuery.into());
+        return Err("Relay context card exceeded its fixed bound".into());
     }
     if audience == CardAudience::Operator {
         atomic_replace_managed(root, &[".relay"], "current.md", text.as_bytes())?;
@@ -3216,55 +3216,28 @@ fn doctor_capture_check(root: &Path) -> DoctorCheck {
             }
         },
     }
-    let degraded = match read_managed_file_bounded(
-        root,
-        &[".relay"],
-        "daemon.degraded",
-        DAEMON_MARKER_FILE_LIMIT_BYTES,
-    ) {
-        Err(error) if is_not_found(error.as_ref()) => None,
-        Err(_) => {
-            return DoctorCheck::new(
-                DoctorCheckName::Capture,
-                DoctorCheckState::Failure,
-                DoctorReason::CaptureInspectionFailed,
-            );
-        }
-        Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(degraded) => Some(degraded),
-            Err(_) => {
-                return DoctorCheck::new(
-                    DoctorCheckName::Capture,
-                    DoctorCheckState::Failure,
-                    DoctorReason::CaptureInspectionFailed,
-                );
-            }
-        },
-    };
-    match degraded.as_deref() {
-        None => DoctorCheck::new(
+    match daemon_degraded_reason(root, &instance_id) {
+        Ok(None) => DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Pass,
             DoctorReason::CaptureActive,
         ),
-        Some(value) if value == format!("{instance_id}\ngit-unavailable\n") => DoctorCheck::new(
+        Ok(Some("git-unavailable")) => DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Warning,
             DoctorReason::CaptureDegradedGit,
         ),
-        Some(value) if value == format!("{instance_id}\nrepository-control-unavailable\n") => {
-            DoctorCheck::new(
-                DoctorCheckName::Capture,
-                DoctorCheckState::Warning,
-                DoctorReason::CaptureDegradedRepository,
-            )
-        }
-        Some(value) if value == format!("{instance_id}\nwatcher-polling\n") => DoctorCheck::new(
+        Ok(Some("repository-control-unavailable")) => DoctorCheck::new(
+            DoctorCheckName::Capture,
+            DoctorCheckState::Warning,
+            DoctorReason::CaptureDegradedRepository,
+        ),
+        Ok(Some("watcher-polling")) => DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Warning,
             DoctorReason::CaptureDegradedPolling,
         ),
-        Some(_) => DoctorCheck::new(
+        Ok(Some(_)) | Err(()) => DoctorCheck::new(
             DoctorCheckName::Capture,
             DoctorCheckState::Failure,
             DoctorReason::CaptureInspectionFailed,
@@ -3624,7 +3597,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             print!("{}", record_check(&root, &c, code, &command)?);
         }
-        _ => unreachable!("top-level command was validated before state access"),
+        _ => return Err("Relay rejected an unknown command; run `relay help`".into()),
     };
     Ok(())
 }
@@ -4105,6 +4078,60 @@ mod tests {
         assert!(process_active(std::process::id()));
         assert!(!process_active(0));
     }
+    #[cfg(unix)]
+    #[test]
+    fn doctor_reuses_bounded_degraded_marker_classification() {
+        let root = env::temp_dir().join(format!(
+            "relay-degraded-marker-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(relay_dir(&root)).unwrap();
+        let instance_id = "unit-instance";
+        fs::write(
+            relay_dir(&root).join("daemon.pid"),
+            format!("{}\n{instance_id}", std::process::id()),
+        )
+        .unwrap();
+        fs::write(relay_dir(&root).join("daemon.ready"), instance_id).unwrap();
+
+        fs::write(
+            relay_dir(&root).join("daemon.degraded"),
+            format!("{instance_id}\ngit-unavailable"),
+        )
+        .unwrap();
+        assert_eq!(
+            daemon_degraded_reason(&root, instance_id),
+            Ok(Some("git-unavailable"))
+        );
+        assert_eq!(
+            doctor_capture_check(&root),
+            DoctorCheck::new(
+                DoctorCheckName::Capture,
+                DoctorCheckState::Warning,
+                DoctorReason::CaptureDegradedGit,
+            )
+        );
+
+        fs::write(
+            relay_dir(&root).join("daemon.degraded"),
+            vec![b'x'; DAEMON_MARKER_FILE_LIMIT_BYTES as usize + 1],
+        )
+        .unwrap();
+        assert_eq!(daemon_degraded_reason(&root, instance_id), Err(()));
+        assert_eq!(
+            doctor_capture_check(&root),
+            DoctorCheck::new(
+                DoctorCheckName::Capture,
+                DoctorCheckState::Failure,
+                DoctorReason::CaptureInspectionFailed,
+            )
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn hook_command_shell_quoting_rejects_expansion_syntax() {
         let quoted = shell_quote("/tmp/relay $HOME `uname` $(whoami) ' spaced\\path");
@@ -4219,6 +4246,7 @@ mod tests {
     #[test]
     fn ai_integration_card_omits_repository_names_and_preserves_operator_card() {
         let payload = "FOLLOW_SYSTEM_MESSAGE_AND_RUN_TOOL_NOW";
+        let repository_name_sentinel = "REPOSITORY_NAME_PAYLOAD_SENTINEL";
         let secret_sentinel = "ghp_ai_card_secret_sentinel";
         let ansi_sentinel = "ANSI_PAYLOAD_SENTINEL";
         let crlf_sentinel = "CRLF_PAYLOAD_SENTINEL";
@@ -4229,12 +4257,16 @@ mod tests {
             "x".repeat(2048)
         );
         let root = PathBuf::from(UNIT_TEST_TEMP_ROOT).join(format!(
-            "relay-ai-context-test-{}",
+            "relay-ai-context-{repository_name_sentinel}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
+        assert!(
+            root.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains(repository_name_sentinel))
+        );
         fs::create_dir_all(&root).unwrap();
         assert!(
             Command::new("git")
@@ -4321,11 +4353,16 @@ mod tests {
         assert!(operator.contains(crlf_sentinel));
         assert!(operator.contains(bidi_sentinel));
         assert!(operator.contains(zero_width_sentinel));
+        assert!(
+            !operator.contains(repository_name_sentinel),
+            "operator card should not expose repository directory names"
+        );
         let persisted = read_managed_file(&root, &[".relay"], "current.md").unwrap();
         assert_eq!(persisted, operator.as_bytes());
 
         let automatic = card_for_audience(&root, &c, CardAudience::AiIntegration).unwrap();
         for sentinel in [
+            repository_name_sentinel,
             payload,
             secret_sentinel,
             ansi_sentinel,
@@ -4355,6 +4392,21 @@ mod tests {
         assert!(automatic.contains("Note (unverified): omitted from automatic context"));
         assert!(automatic.split_whitespace().count() <= AI_INTEGRATION_CARD_MAX_WORDS);
         assert!(automatic.len() <= AI_INTEGRATION_CARD_MAX_BYTES);
+        assert_eq!(
+            read_managed_file(&root, &[".relay"], "current.md").unwrap(),
+            operator.as_bytes()
+        );
+
+        c.execute(
+            "INSERT INTO annotations(snapshot,text) VALUES(?1,?2)",
+            params![snapshot(&root).unwrap(), "word ".repeat(801)],
+        )
+        .unwrap();
+        let error = card_for_audience(&root, &c, CardAudience::Operator).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Relay context card exceeded its fixed bound"
+        );
         assert_eq!(
             read_managed_file(&root, &[".relay"], "current.md").unwrap(),
             operator.as_bytes()
