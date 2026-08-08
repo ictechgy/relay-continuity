@@ -129,6 +129,37 @@ fn run_with_state_home(root: &Path, args: &[&str], state_home: &Path) -> std::pr
         .output()
         .expect("run relay with isolated state home")
 }
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_with_default_state_base(
+    root: &Path,
+    args: &[&str],
+    home: &Path,
+    xdg_state_home: Option<&Path>,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_relay"));
+    command
+        .args(args)
+        .current_dir(root)
+        .env_remove("RELAY_STATE_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"));
+    if let Some(xdg_state_home) = xdg_state_home {
+        command.env("XDG_STATE_HOME", xdg_state_home);
+    }
+    command
+        .output()
+        .expect("run relay with production default state base")
+}
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn isolated_sibling_path(root: &Path, suffix: &str) -> PathBuf {
+    fs::canonicalize(root.parent().expect("fixture parent"))
+        .expect("canonical fixture parent")
+        .join(format!(
+            "{}-{suffix}",
+            root.file_name().expect("fixture name").to_string_lossy()
+        ))
+}
 #[cfg(unix)]
 fn run_with_state_and_user_home(
     root: &Path,
@@ -341,6 +372,66 @@ fn global_help_version_and_unknown_commands_never_require_or_mutate_a_repository
     assert!(!root.join(".relay").exists());
     assert!(!state_home.exists());
     fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_default_state_path_prefers_xdg_state_home_on_linux() {
+    let root = git_fixture("default-xdg-state-home-test");
+    let home = isolated_sibling_path(&root, "home");
+    let xdg_state_home = isolated_sibling_path(&root, "xdg-state");
+    let _root_cleanup = FixtureCleanup(root.clone());
+    let _home_cleanup = FixtureCleanup(home.clone());
+    let _xdg_cleanup = FixtureCleanup(xdg_state_home.clone());
+    fs::create_dir_all(&home).expect("create isolated home");
+
+    let output = run_with_default_state_base(&root, &["init"], &home, Some(&xdg_state_home));
+
+    assert!(
+        output.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(state_database_at(&root, &xdg_state_home).is_file());
+    assert!(!state_database_at(&root, &home.join(".local/state")).exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn production_default_state_path_falls_back_to_home_on_linux() {
+    let root = git_fixture("default-home-state-test");
+    let home = isolated_sibling_path(&root, "home");
+    let _root_cleanup = FixtureCleanup(root.clone());
+    let _home_cleanup = FixtureCleanup(home.clone());
+    fs::create_dir_all(&home).expect("create isolated home");
+
+    let output = run_with_default_state_base(&root, &["init"], &home, None);
+
+    assert!(
+        output.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(state_database_at(&root, &home.join(".local/state")).is_file());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn production_default_state_path_uses_application_support_on_macos() {
+    let root = git_fixture("default-application-support-state-test");
+    let home = isolated_sibling_path(&root, "home");
+    let _root_cleanup = FixtureCleanup(root.clone());
+    let _home_cleanup = FixtureCleanup(home.clone());
+    fs::create_dir_all(&home).expect("create isolated home");
+
+    let output = run_with_default_state_base(&root, &["init"], &home, None);
+
+    assert!(
+        output.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(state_database_at(&root, &home.join("Library/Application Support")).is_file());
 }
 
 #[test]

@@ -353,23 +353,27 @@ fn read_file_at_no_follow(
     Ok(bytes)
 }
 #[cfg(unix)]
+fn open_file_at_no_follow(parent: &fs::File, file_name: &CString) -> std::io::Result<fs::File> {
+    let descriptor = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            file_name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+        )
+    };
+    if descriptor < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { fs::File::from_raw_fd(descriptor) })
+}
+#[cfg(unix)]
 fn open_regular_file_at_no_follow_bounded(
     parent: &fs::File,
     file_name: &str,
     maximum_bytes: u64,
 ) -> Result<(fs::File, IgnoreFileIdentity), Box<dyn std::error::Error>> {
     let name = managed_component(file_name)?;
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let file = unsafe { fs::File::from_raw_fd(descriptor) };
+    let file = open_file_at_no_follow(parent, &name)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() || metadata.len() > maximum_bytes {
         return Err("Relay rejected an unsafe or oversized repository control file".into());
@@ -420,18 +424,8 @@ fn read_managed_file_bounded(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let parent = managed_directory_no_follow(root, components, false)?;
     let name = managed_component(file_name)?;
-    let descriptor = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
     read_opened_regular_file_bounded(
-        unsafe { fs::File::from_raw_fd(descriptor) },
+        open_file_at_no_follow(&parent, &name)?,
         maximum_bytes,
         "Relay rejected an unsafe or oversized managed state file",
     )
@@ -470,18 +464,8 @@ fn read_regular_file_no_follow_bounded(
         .file_name()
         .ok_or("Relay service path has no file name")?;
     let file_name = CString::new(file_name.as_bytes())?;
-    let descriptor = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            file_name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if descriptor < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
     read_opened_regular_file_bounded(
-        unsafe { fs::File::from_raw_fd(descriptor) },
+        open_file_at_no_follow(&directory, &file_name)?,
         maximum_bytes,
         "Relay rejected an unsafe or oversized file",
     )
@@ -652,67 +636,194 @@ fn codex_hook_matches_manifest(
     .map(|bytes| hash(&bytes) == *expected)
     .unwrap_or(false)
 }
-fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std::error::Error>> {
-    if !integration_provider_is_valid(provider) {
-        return Err("Relay rejected an unsupported integration provider".into());
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntegrationPolicyState {
+    Disabled,
+    AwaitingTrust,
+    Ready,
+    Unavailable,
+    Drifted,
+    Broken,
+}
+impl IntegrationPolicyState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::AwaitingTrust => "awaiting_trust",
+            Self::Ready => "ready",
+            Self::Unavailable => "unavailable",
+            Self::Drifted => "drifted",
+            Self::Broken => "broken",
+        }
     }
-    ensure_integration_directory(root, false)?;
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntegrationInspectionFailure {
+    Manifest,
+    MissingManifestOwned,
+    MissingManifestHook,
+    ConfiguredOwned,
+    ConfiguredHook,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntegrationInspection {
+    Policy(IntegrationPolicyState),
+    OrphanedOwned,
+    UnownedHook,
+    InspectionFailed(IntegrationInspectionFailure),
+}
+fn inspect_integration_policy(root: &Path, provider: &str) -> IntegrationInspection {
     let manifest = match read_managed_file_bounded(
         root,
         &[".relay", "integrations"],
         &format!("{provider}.state"),
         INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
     ) {
-        Err(error) if is_not_found(error.as_ref()) => return Ok("disabled".into()),
-        Err(_) => return Ok("broken".into()),
-        Ok(bytes) => bytes,
-    };
-    let Some(values) = parse_integration_key_values(&manifest) else {
-        return Ok("broken".into());
-    };
-    if values.get("version").map(String::as_str) != Some("1")
-        || values.get("provider").map(String::as_str) != Some(provider)
-    {
-        return Ok("broken".into());
-    }
-    match values.get("state").map(String::as_str) {
-        Some(
-            state
-            @ ("disabled" | "awaiting_trust" | "ready" | "unavailable" | "drifted" | "broken"),
-        ) => {
-            if matches!(state, "drifted" | "broken") {
-                return Ok(state.into());
-            }
-            let root_hash = hash(root.to_string_lossy().as_bytes());
-            let Ok(owned) = read_managed_file_bounded(
+        Err(error) if is_not_found(error.as_ref()) => {
+            return match read_managed_file_bounded(
                 root,
                 &[".relay", "integrations"],
                 &format!("{provider}.owned"),
                 INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
-            ) else {
-                return Ok("drifted".into());
+            ) {
+                Ok(_) => IntegrationInspection::OrphanedOwned,
+                Err(error) if is_not_found(error.as_ref()) => {
+                    if provider != "codex" {
+                        return IntegrationInspection::Policy(IntegrationPolicyState::Disabled);
+                    }
+                    match read_managed_file_bounded(
+                        root,
+                        &[".codex"],
+                        "hooks.json",
+                        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
+                    ) {
+                        Err(error) if is_not_found(error.as_ref()) => {
+                            IntegrationInspection::Policy(IntegrationPolicyState::Disabled)
+                        }
+                        Err(_) => IntegrationInspection::InspectionFailed(
+                            IntegrationInspectionFailure::MissingManifestHook,
+                        ),
+                        Ok(current) => match codex_hook_config(root) {
+                            Ok(expected) if current == expected => {
+                                IntegrationInspection::UnownedHook
+                            }
+                            Ok(_) => {
+                                IntegrationInspection::Policy(IntegrationPolicyState::Disabled)
+                            }
+                            Err(_) => IntegrationInspection::InspectionFailed(
+                                IntegrationInspectionFailure::MissingManifestHook,
+                            ),
+                        },
+                    }
+                }
+                Err(_) => IntegrationInspection::InspectionFailed(
+                    IntegrationInspectionFailure::MissingManifestOwned,
+                ),
             };
-            let owned_values = parse_integration_key_values(&owned);
-            let owned_matches = values.get("config_hash") == Some(&hash(&owned))
-                && owned_values.as_ref().is_some_and(|owned_values| {
-                    owned_values.get("version").map(String::as_str) == Some("1")
-                        && owned_values.get("provider").map(String::as_str) == Some(provider)
-                        && owned_values.get("state").map(String::as_str) == Some(state)
-                });
-            if values.get("root_hash") != Some(&root_hash) || !owned_matches {
-                return Ok("drifted".into());
-            }
-            if provider == "codex"
-                && matches!(state, "awaiting_trust" | "ready")
-                && !codex_hook_matches_manifest(root, &values)
-            {
-                Ok("drifted".into())
-            } else {
-                Ok(state.into())
-            }
         }
-        _ => Ok("broken".into()),
+        Err(_) => {
+            return IntegrationInspection::InspectionFailed(IntegrationInspectionFailure::Manifest);
+        }
+        Ok(bytes) => bytes,
+    };
+    let Some(values) = parse_integration_key_values(&manifest) else {
+        return IntegrationInspection::Policy(IntegrationPolicyState::Broken);
+    };
+    if values.get("version").map(String::as_str) != Some("1")
+        || values.get("provider").map(String::as_str) != Some(provider)
+    {
+        return IntegrationInspection::Policy(IntegrationPolicyState::Broken);
     }
+    let state = match values.get("state").map(String::as_str) {
+        Some("disabled") => IntegrationPolicyState::Disabled,
+        Some("awaiting_trust") => IntegrationPolicyState::AwaitingTrust,
+        Some("ready") => IntegrationPolicyState::Ready,
+        Some("unavailable") => IntegrationPolicyState::Unavailable,
+        Some("drifted") => {
+            return IntegrationInspection::Policy(IntegrationPolicyState::Drifted);
+        }
+        Some("broken") => {
+            return IntegrationInspection::Policy(IntegrationPolicyState::Broken);
+        }
+        _ => return IntegrationInspection::Policy(IntegrationPolicyState::Broken),
+    };
+    let owned = match read_managed_file_bounded(
+        root,
+        &[".relay", "integrations"],
+        &format!("{provider}.owned"),
+        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
+    ) {
+        Ok(owned) => owned,
+        Err(error) if is_not_found(error.as_ref()) => {
+            return IntegrationInspection::Policy(IntegrationPolicyState::Drifted);
+        }
+        Err(_) => {
+            return IntegrationInspection::InspectionFailed(
+                IntegrationInspectionFailure::ConfiguredOwned,
+            );
+        }
+    };
+    let Some(owned_values) = parse_integration_key_values(&owned) else {
+        return IntegrationInspection::Policy(IntegrationPolicyState::Drifted);
+    };
+    let root_hash = hash(root.to_string_lossy().as_bytes());
+    if values.get("root_hash") != Some(&root_hash)
+        || values.get("config_hash") != Some(&hash(&owned))
+        || owned_values.get("version").map(String::as_str) != Some("1")
+        || owned_values.get("provider").map(String::as_str) != Some(provider)
+        || owned_values.get("state").map(String::as_str) != Some(state.as_str())
+    {
+        return IntegrationInspection::Policy(IntegrationPolicyState::Drifted);
+    }
+    if provider == "codex"
+        && matches!(
+            state,
+            IntegrationPolicyState::AwaitingTrust | IntegrationPolicyState::Ready
+        )
+    {
+        let hook = match read_managed_file_bounded(
+            root,
+            &[".codex"],
+            "hooks.json",
+            INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
+        ) {
+            Ok(hook) => hook,
+            Err(error) if is_not_found(error.as_ref()) => {
+                return IntegrationInspection::Policy(IntegrationPolicyState::Drifted);
+            }
+            Err(_) => {
+                return IntegrationInspection::InspectionFailed(
+                    IntegrationInspectionFailure::ConfiguredHook,
+                );
+            }
+        };
+        if values.get("hook_hash") != Some(&hash(&hook)) {
+            return IntegrationInspection::Policy(IntegrationPolicyState::Drifted);
+        }
+    }
+    IntegrationInspection::Policy(state)
+}
+fn integration_state_from_inspection(inspection: IntegrationInspection) -> &'static str {
+    match inspection {
+        IntegrationInspection::Policy(state) => state.as_str(),
+        IntegrationInspection::OrphanedOwned | IntegrationInspection::UnownedHook => "disabled",
+        IntegrationInspection::InspectionFailed(IntegrationInspectionFailure::Manifest) => "broken",
+        IntegrationInspection::InspectionFailed(
+            IntegrationInspectionFailure::MissingManifestOwned
+            | IntegrationInspectionFailure::MissingManifestHook,
+        ) => "disabled",
+        IntegrationInspection::InspectionFailed(
+            IntegrationInspectionFailure::ConfiguredOwned
+            | IntegrationInspectionFailure::ConfiguredHook,
+        ) => "drifted",
+    }
+}
+fn integration_state(root: &Path, provider: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if !integration_provider_is_valid(provider) {
+        return Err("Relay rejected an unsupported integration provider".into());
+    }
+    ensure_integration_directory(root, false)?;
+    Ok(integration_state_from_inspection(inspect_integration_policy(root, provider)).into())
 }
 fn integration_manifest_values(
     root: &Path,
@@ -2845,110 +2956,35 @@ fn doctor_evidence_check(_root: &Path) -> DoctorCheck {
     )
 }
 
+fn doctor_reason_from_integration_inspection(inspection: IntegrationInspection) -> DoctorReason {
+    match inspection {
+        IntegrationInspection::Policy(IntegrationPolicyState::Ready) => {
+            DoctorReason::IntegrationReady
+        }
+        IntegrationInspection::Policy(IntegrationPolicyState::Disabled) => {
+            DoctorReason::IntegrationDisabled
+        }
+        IntegrationInspection::Policy(IntegrationPolicyState::AwaitingTrust) => {
+            DoctorReason::IntegrationAwaitingTrust
+        }
+        IntegrationInspection::Policy(IntegrationPolicyState::Unavailable) => {
+            DoctorReason::IntegrationUnavailable
+        }
+        IntegrationInspection::Policy(IntegrationPolicyState::Drifted)
+        | IntegrationInspection::OrphanedOwned => DoctorReason::IntegrationDrifted,
+        IntegrationInspection::Policy(IntegrationPolicyState::Broken) => {
+            DoctorReason::IntegrationBroken
+        }
+        IntegrationInspection::UnownedHook => DoctorReason::IntegrationUnownedHook,
+        IntegrationInspection::InspectionFailed(_) => DoctorReason::IntegrationInspectionFailed,
+    }
+}
+
 fn doctor_integration_state(root: &Path, provider: &str) -> DoctorReason {
-    let manifest = match read_managed_file_bounded(
-        root,
-        &[".relay", "integrations"],
-        &format!("{provider}.state"),
-        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
-    ) {
-        Err(error) if is_not_found(error.as_ref()) => {
-            return match read_managed_file_bounded(
-                root,
-                &[".relay", "integrations"],
-                &format!("{provider}.owned"),
-                INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
-            ) {
-                Err(error) if is_not_found(error.as_ref()) => {
-                    if provider != "codex" {
-                        return DoctorReason::IntegrationDisabled;
-                    }
-                    match read_managed_file_bounded(
-                        root,
-                        &[".codex"],
-                        "hooks.json",
-                        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
-                    ) {
-                        Err(error) if is_not_found(error.as_ref()) => {
-                            DoctorReason::IntegrationDisabled
-                        }
-                        Err(_) => DoctorReason::IntegrationInspectionFailed,
-                        Ok(current) => match codex_hook_config(root) {
-                            Ok(expected) if current == expected => {
-                                DoctorReason::IntegrationUnownedHook
-                            }
-                            Ok(_) => DoctorReason::IntegrationDisabled,
-                            Err(_) => DoctorReason::IntegrationInspectionFailed,
-                        },
-                    }
-                }
-                Ok(_) => DoctorReason::IntegrationDrifted,
-                Err(_) => DoctorReason::IntegrationInspectionFailed,
-            };
-        }
-        Err(_) => return DoctorReason::IntegrationInspectionFailed,
-        Ok(manifest) => manifest,
-    };
-    let Some(values) = parse_integration_key_values(&manifest) else {
-        return DoctorReason::IntegrationBroken;
-    };
-    if values.get("version").map(String::as_str) != Some("1")
-        || values.get("provider").map(String::as_str) != Some(provider)
-    {
-        return DoctorReason::IntegrationBroken;
+    if !integration_provider_is_valid(provider) {
+        return DoctorReason::IntegrationInspectionFailed;
     }
-    let state = match values.get("state").map(String::as_str) {
-        Some(state @ ("disabled" | "awaiting_trust" | "ready" | "unavailable")) => state,
-        Some("drifted") => return DoctorReason::IntegrationDrifted,
-        Some("broken") => return DoctorReason::IntegrationBroken,
-        _ => return DoctorReason::IntegrationBroken,
-    };
-    let owned = match read_managed_file_bounded(
-        root,
-        &[".relay", "integrations"],
-        &format!("{provider}.owned"),
-        INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
-    ) {
-        Ok(owned) => owned,
-        Err(error) if is_not_found(error.as_ref()) => return DoctorReason::IntegrationDrifted,
-        Err(_) => return DoctorReason::IntegrationInspectionFailed,
-    };
-    let Some(owned_values) = parse_integration_key_values(&owned) else {
-        return DoctorReason::IntegrationDrifted;
-    };
-    let root_hash = hash(root.to_string_lossy().as_bytes());
-    if values.get("root_hash") != Some(&root_hash)
-        || values.get("config_hash") != Some(&hash(&owned))
-        || owned_values.get("version").map(String::as_str) != Some("1")
-        || owned_values.get("provider").map(String::as_str) != Some(provider)
-        || owned_values.get("state").map(String::as_str) != Some(state)
-    {
-        return DoctorReason::IntegrationDrifted;
-    }
-    if provider == "codex" && matches!(state, "awaiting_trust" | "ready") {
-        let hook = match read_managed_file_bounded(
-            root,
-            &[".codex"],
-            "hooks.json",
-            INTEGRATION_MANAGED_FILE_LIMIT_BYTES,
-        ) {
-            Ok(hook) => hook,
-            Err(error) if is_not_found(error.as_ref()) => {
-                return DoctorReason::IntegrationDrifted;
-            }
-            Err(_) => return DoctorReason::IntegrationInspectionFailed,
-        };
-        if values.get("hook_hash") != Some(&hash(&hook)) {
-            return DoctorReason::IntegrationDrifted;
-        }
-    }
-    match state {
-        "ready" => DoctorReason::IntegrationReady,
-        "disabled" => DoctorReason::IntegrationDisabled,
-        "awaiting_trust" => DoctorReason::IntegrationAwaitingTrust,
-        "unavailable" => DoctorReason::IntegrationUnavailable,
-        _ => DoctorReason::IntegrationBroken,
-    }
+    doctor_reason_from_integration_inspection(inspect_integration_policy(root, provider))
 }
 
 fn doctor_integration_check(name: DoctorCheckName, reason: DoctorReason) -> DoctorCheck {
@@ -3650,6 +3686,110 @@ mod tests {
             0
         );
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn integration_inspection_projections_remain_in_parity() {
+        let cases = [
+            (
+                "ready",
+                IntegrationInspection::Policy(IntegrationPolicyState::Ready),
+                "ready",
+                DoctorReason::IntegrationReady,
+            ),
+            (
+                "disabled",
+                IntegrationInspection::Policy(IntegrationPolicyState::Disabled),
+                "disabled",
+                DoctorReason::IntegrationDisabled,
+            ),
+            (
+                "awaiting trust",
+                IntegrationInspection::Policy(IntegrationPolicyState::AwaitingTrust),
+                "awaiting_trust",
+                DoctorReason::IntegrationAwaitingTrust,
+            ),
+            (
+                "unavailable",
+                IntegrationInspection::Policy(IntegrationPolicyState::Unavailable),
+                "unavailable",
+                DoctorReason::IntegrationUnavailable,
+            ),
+            (
+                "drifted",
+                IntegrationInspection::Policy(IntegrationPolicyState::Drifted),
+                "drifted",
+                DoctorReason::IntegrationDrifted,
+            ),
+            (
+                "broken",
+                IntegrationInspection::Policy(IntegrationPolicyState::Broken),
+                "broken",
+                DoctorReason::IntegrationBroken,
+            ),
+            (
+                "orphaned owned state",
+                IntegrationInspection::OrphanedOwned,
+                "disabled",
+                DoctorReason::IntegrationDrifted,
+            ),
+            (
+                "unowned Relay hook",
+                IntegrationInspection::UnownedHook,
+                "disabled",
+                DoctorReason::IntegrationUnownedHook,
+            ),
+            (
+                "manifest inspection failure",
+                IntegrationInspection::InspectionFailed(IntegrationInspectionFailure::Manifest),
+                "broken",
+                DoctorReason::IntegrationInspectionFailed,
+            ),
+            (
+                "owned inspection failure without manifest",
+                IntegrationInspection::InspectionFailed(
+                    IntegrationInspectionFailure::MissingManifestOwned,
+                ),
+                "disabled",
+                DoctorReason::IntegrationInspectionFailed,
+            ),
+            (
+                "hook inspection failure without manifest",
+                IntegrationInspection::InspectionFailed(
+                    IntegrationInspectionFailure::MissingManifestHook,
+                ),
+                "disabled",
+                DoctorReason::IntegrationInspectionFailed,
+            ),
+            (
+                "configured owned inspection failure",
+                IntegrationInspection::InspectionFailed(
+                    IntegrationInspectionFailure::ConfiguredOwned,
+                ),
+                "drifted",
+                DoctorReason::IntegrationInspectionFailed,
+            ),
+            (
+                "configured hook inspection failure",
+                IntegrationInspection::InspectionFailed(
+                    IntegrationInspectionFailure::ConfiguredHook,
+                ),
+                "drifted",
+                DoctorReason::IntegrationInspectionFailed,
+            ),
+        ];
+
+        for (label, inspection, cli_state, doctor_reason) in cases {
+            assert_eq!(
+                integration_state_from_inspection(inspection),
+                cli_state,
+                "CLI projection drifted for {label}"
+            );
+            assert_eq!(
+                doctor_reason_from_integration_inspection(inspection),
+                doctor_reason,
+                "doctor projection drifted for {label}"
+            );
+        }
     }
     #[cfg(unix)]
     #[test]
