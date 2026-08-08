@@ -11,10 +11,10 @@ const codeqlWorkflow = await readFile(resolve(root, ".github/workflows/codeql.ym
 const codeqlConfig = await readFile(resolve(root, ".github/codeql/codeql-config.yml"), "utf8");
 const relayMain = await readFile(resolve(root, "src/main.rs"), "utf8");
 
-function jobBlock(source, name) {
+function jobBlock(source, sourceName, name) {
   const lines = source.split(/\r?\n/);
   const start = lines.findIndex((line) => line === `  ${name}:`);
-  if (start < 0) throw new Error(`release workflow has no ${name} job`);
+  if (start < 0) throw new Error(`${sourceName} workflow has no ${name} job`);
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
     if (/^  [A-Za-z0-9_-]+:$/.test(lines[index])) {
@@ -25,10 +25,10 @@ function jobBlock(source, name) {
   return lines.slice(start, end).join("\n");
 }
 
-function mappingEntries(source, header) {
+function mappingEntries(source, sourceName, header) {
   const lines = source.split(/\r?\n/);
   const start = lines.findIndex((line) => line === header);
-  if (start < 0) throw new Error(`workflow has no ${header.trim()} mapping`);
+  if (start < 0) throw new Error(`${sourceName} workflow has no ${header.trim()} mapping`);
   const indentation = header.length - header.trimStart().length;
   const entries = [];
   for (let index = start + 1; index < lines.length; index += 1) {
@@ -41,8 +41,20 @@ function mappingEntries(source, header) {
   return entries;
 }
 
-function declaredJobNeeds(source, name) {
-  const job = jobBlock(source, name);
+function expectFailure(action, label, expectedMessage) {
+  try {
+    action();
+  } catch (error) {
+    if (expectedMessage !== undefined && error.message !== expectedMessage) {
+      throw new Error(`${label} failed for the wrong reason: ${error.message}`);
+    }
+    return;
+  }
+  throw new Error(`${label} unexpectedly passed`);
+}
+
+function declaredJobNeeds(source, sourceName, name) {
+  const job = jobBlock(source, sourceName, name);
   const match = job.match(/^    needs:\s*(.+)$/m);
   if (!match) return [];
   const value = match[1].trim();
@@ -50,27 +62,29 @@ function declaredJobNeeds(source, name) {
     ? value.slice(1, -1).split(",").map((entry) => entry.trim())
     : [value];
   if (needs.some((entry) => !/^[A-Za-z0-9_-]+$/.test(entry))) {
-    throw new Error(`${name} job has an unparsed needs contract`);
+    throw new Error(`${sourceName} workflow ${name} job has an unparsed needs contract`);
   }
   return needs;
 }
 
-function transitivelyNeeds(source, name, required, visiting = new Set()) {
+function transitivelyNeeds(source, sourceName, name, required, visiting = new Set()) {
   if (name === required) return true;
-  if (visiting.has(name)) throw new Error(`release workflow has a needs cycle at ${name}`);
+  if (visiting.has(name)) throw new Error(`${sourceName} workflow has a needs cycle at ${name}`);
   const nextVisiting = new Set(visiting).add(name);
-  return declaredJobNeeds(source, name).some((dependency) =>
-    transitivelyNeeds(source, dependency, required, nextVisiting)
+  return declaredJobNeeds(source, sourceName, name).some((dependency) =>
+    transitivelyNeeds(source, sourceName, dependency, required, nextVisiting)
   );
 }
 
-function verifyPinnedNode24(source, name) {
-  const job = jobBlock(source, name);
+function verifyPinnedNode24(source, sourceName, name) {
+  const job = jobBlock(source, sourceName, name);
   const matches = job.match(
     /- uses: actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n(?:          registry-url: https:\/\/registry\.npmjs\.org\n)?          package-manager-cache: false/g
   ) ?? [];
   if (matches.length !== 1) {
-    throw new Error(`${name} job must select Node 24 with the reviewed immutable setup-node pin`);
+    throw new Error(
+      `${sourceName} workflow ${name} job must select Node 24 with the reviewed immutable setup-node pin`
+    );
   }
 }
 
@@ -88,14 +102,154 @@ function verifyRemoteActionPin(value, location) {
   }
 }
 
-function verifyNpmPublishTrigger(source) {
-  const job = jobBlock(source, "npm-publish");
+const tagPushCondition = "github.event_name == 'push' && github.ref_type == 'tag'";
+const releaseAuthorityConditions = [
+  ["archive", tagPushCondition],
+  ["npm-packages", tagPushCondition],
+  ["npm-publish", `${tagPushCondition} && vars.PUBLISH_NPM == 'true'`]
+];
+
+function jobLevelConditions(source, sourceName, name) {
+  const job = jobBlock(source, sourceName, name);
+  return [...job.matchAll(/^    if:\s*(.*?)\s*$/gm)].map((match) => match[1]);
+}
+
+function verifyReleaseAuthorityTriggers(source) {
+  const contractConditions = jobLevelConditions(source, "release", "release-contract");
+  if (contractConditions.length !== 0) {
+    throw new Error("release-contract must run for workflow_dispatch branch validation");
+  }
+
+  for (const [name, expected] of releaseAuthorityConditions) {
+    const actual = jobLevelConditions(source, "release", name);
+    if (actual.length !== 1 || actual[0] !== expected) {
+      throw new Error(
+        `release workflow ${name} job must have the exact authority guard: ${expected}`
+      );
+    }
+  }
+}
+
+function mutateJobBlock(source, sourceName, name, mutate) {
+  const original = jobBlock(source, sourceName, name);
+  const replacement = mutate(original);
+  if (replacement === original) {
+    throw new Error(`${sourceName} workflow ${name} mutation fixture was not found`);
+  }
+  const start = source.indexOf(original);
+  return `${source.slice(0, start)}${replacement}${source.slice(start + original.length)}`;
+}
+
+function namedStepBlock(source, sourceName, jobName, stepName) {
+  const job = jobBlock(source, sourceName, jobName);
+  const lines = job.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === `      - name: ${stepName}`);
+  if (start < 0) {
+    throw new Error(`${sourceName} workflow ${jobName} job has no ${stepName} step`);
+  }
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (/^      - /.test(lines[index])) {
+      end = index;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+function literalRunScript(step, sourceName, stepName) {
+  const lines = step.split(/\r?\n/);
+  const start = lines.findIndex((line) => line === "        run: |");
+  if (start < 0) throw new Error(`${sourceName} workflow ${stepName} step has no literal run script`);
+  return lines
+    .slice(start + 1)
+    .map((line) => {
+      if (!line) return "";
+      if (!line.startsWith("          ")) {
+        throw new Error(`${sourceName} workflow ${stepName} step has an unparsed run script`);
+      }
+      return line.slice(10);
+    })
+    .join("\n");
+}
+
+function verifyLinuxArtifactInspection(source) {
+  const stepName = "Reject dynamic, interpreted, or GLIBC-linked Linux artifacts";
+  const step = namedStepBlock(source, "release", "archive", stepName);
+  if (!/^        shell: bash$/m.test(step)) {
+    throw new Error("Linux artifact inspection must select bash explicitly");
+  }
+  const script = literalRunScript(step, "release", stepName);
+  const meaningfulLines = script.split(/\r?\n/).filter((line) => line.trim());
+  if (meaningfulLines[0] !== "set -euo pipefail") {
+    throw new Error("Linux artifact inspection must start in strict pipefail mode");
+  }
   if (
-    !/^  npm-publish:\n    if: github\.event_name == 'push' && github\.ref_type == 'tag' && vars\.PUBLISH_NPM == 'true'$/m.test(
-      job
+    !script.includes(
+      'for tool in file readelf strings grep; do\n  command -v "$tool" >/dev/null\ndone'
     )
   ) {
-    throw new Error("npm publish must require an enabled tag push");
+    throw new Error("Linux artifact inspection must verify every required tool explicitly");
+  }
+  if (!script.includes('diagnostics_dir="$(mktemp -d)"')) {
+    throw new Error("Linux artifact inspection must use a fresh diagnostics directory");
+  }
+  if (!script.includes(`trap 'rm -rf -- "$diagnostics_dir"' EXIT`)) {
+    throw new Error("Linux artifact inspection must clean its diagnostics directory");
+  }
+
+  const expectedInvocations = [
+    'file relay-linux-x86_64 > "$diagnostics_dir/file.txt"',
+    'readelf -d relay-linux-x86_64 > "$diagnostics_dir/dynamic.txt"',
+    'readelf -l relay-linux-x86_64 > "$diagnostics_dir/program-headers.txt"',
+    'strings relay-linux-x86_64 > "$diagnostics_dir/strings.txt"'
+  ];
+  const actualInvocations = meaningfulLines
+    .map((line) => line.trim())
+    .filter((line) =>
+      /(?:^|[^A-Za-z0-9_-])(?:file|readelf|strings)(?:\s+-[dl])?\s+relay-linux-x86_64(?:\s|$)/.test(
+        line
+      )
+    );
+  if (JSON.stringify(actualInvocations) !== JSON.stringify(expectedInvocations)) {
+    throw new Error(
+      "Linux artifact diagnostic tools must run directly and capture output before inspection"
+    );
+  }
+
+  const rejectPatternContract = `reject_pattern() {
+  local pattern="$1"
+  local input="$2"
+  local violation="$3"
+  local status=0
+  grep -E "$pattern" "$input" >/dev/null || status=$?
+  case "$status" in
+    0)
+      echo "$violation" >&2
+      return 1
+      ;;
+    1)
+      return 0
+      ;;
+    *)
+      echo "Linux artifact inspection failed while reading captured diagnostics" >&2
+      return 1
+      ;;
+  esac
+}`;
+  if (!script.includes(rejectPatternContract)) {
+    throw new Error("Linux artifact negative checks must reject matches and grep errors");
+  }
+
+  for (const inspection of [
+    `grep -E 'x86-64.*static' "$diagnostics_dir/file.txt" >/dev/null`,
+    `reject_pattern '(NEEDED)' "$diagnostics_dir/dynamic.txt" \\\n  "Linux release artifact has a dynamic dependency"`,
+    `reject_pattern '(^|[[:space:]])(PT_)?INTERP([[:space:]]|$)' \\\n  "$diagnostics_dir/program-headers.txt" \\\n  "Linux release artifact has an ELF interpreter segment"`,
+    `reject_pattern 'GLIBC_[0-9]' "$diagnostics_dir/strings.txt" \\\n  "Linux release artifact retains a GLIBC symbol contract"`
+  ]) {
+    if (!script.includes(inspection)) {
+      throw new Error(`Linux artifact inspection is missing: ${inspection}`);
+    }
   }
 }
 
@@ -145,7 +299,7 @@ function verifyNoFloatingRunnerLabels(source, sourceName) {
 
 function verifyReleaseSmokeGitStatusFixture(workflowSource, rustSource) {
   const expected = productionGitStatusArgs(rustSource).join(" ");
-  const archiveJob = jobBlock(workflowSource, "archive");
+  const archiveJob = jobBlock(workflowSource, "release", "archive");
   if ((archiveJob.match(/^\s*'case "\$\*" in'\s*\\\s*$/gm) ?? []).length !== 1) {
     throw new Error("release smoke fake Git fixture must match the complete argument vector");
   }
@@ -208,9 +362,9 @@ for (const [action, approved] of githubActionPins) {
     throw new Error(`workflows contain an unparsed ${action} reference`);
   }
 }
-verifyPinnedNode24(ciWorkflow, "test");
-verifyPinnedNode24(workflow, "release-contract");
-verifyPinnedNode24(workflow, "npm-publish");
+verifyPinnedNode24(ciWorkflow, "ci", "test");
+verifyPinnedNode24(workflow, "release", "release-contract");
+verifyPinnedNode24(workflow, "release", "npm-publish");
 verifyRemoteActionPin(`docker://example.invalid/image@sha256:${"a".repeat(64)}`, "fixture");
 for (const value of ["docker://example.invalid/image:latest", "docker://example.invalid/image@main"]) {
   try {
@@ -221,21 +375,104 @@ for (const value of ["docker://example.invalid/image:latest", "docker://example.
   }
 }
 
-verifyNpmPublishTrigger(workflow);
-for (const fragment of [
-  "github.event_name == 'push' && ",
-  "github.ref_type == 'tag' && ",
-  " && vars.PUBLISH_NPM == 'true'"
-]) {
-  const mutated = workflow.replace(fragment, "");
-  if (mutated === workflow) throw new Error(`publish trigger mutation fixture not found: ${fragment}`);
-  try {
-    verifyNpmPublishTrigger(mutated);
-    throw new Error(`weakened npm publish trigger unexpectedly passed: ${fragment}`);
-  } catch (error) {
-    if (error.message.startsWith("weakened npm publish trigger unexpectedly passed")) throw error;
+for (const sourceName of ["ci", "release", "codeql"]) {
+  expectFailure(
+    () => jobBlock("jobs:\n", sourceName, "missing"),
+    `${sourceName} jobBlock source-name regression`,
+    `${sourceName} workflow has no missing job`
+  );
+  expectFailure(
+    () => mappingEntries("name: fixture\n", sourceName, "permissions:"),
+    `${sourceName} mappingEntries source-name regression`,
+    `${sourceName} workflow has no permissions: mapping`
+  );
+}
+
+verifyReleaseAuthorityTriggers(workflow);
+const dispatchBlockedContract = mutateJobBlock(
+  workflow,
+  "release",
+  "release-contract",
+  (job) => job.replace("  release-contract:\n", `  release-contract:\n    if: ${tagPushCondition}\n`)
+);
+expectFailure(
+  () => verifyReleaseAuthorityTriggers(dispatchBlockedContract),
+  "workflow_dispatch release-contract guard mutation",
+  "release-contract must run for workflow_dispatch branch validation"
+);
+for (const [jobName, condition] of releaseAuthorityConditions) {
+  const guard = `    if: ${condition}`;
+  const withoutGuard = mutateJobBlock(workflow, "release", jobName, (job) =>
+    job.replace(`${guard}\n`, "")
+  );
+  expectFailure(
+    () => verifyReleaseAuthorityTriggers(withoutGuard),
+    `${jobName} missing authority guard mutation`,
+    `release workflow ${jobName} job must have the exact authority guard: ${condition}`
+  );
+
+  const requiredFragments = [
+    "github.event_name == 'push' && ",
+    " && github.ref_type == 'tag'",
+    ...(jobName === "npm-publish" ? [" && vars.PUBLISH_NPM == 'true'"] : [])
+  ];
+  for (const fragment of requiredFragments) {
+    const weakened = mutateJobBlock(workflow, "release", jobName, (job) =>
+      job.replace(guard, guard.replace(fragment, ""))
+    );
+    expectFailure(
+      () => verifyReleaseAuthorityTriggers(weakened),
+      `${jobName} weakened authority guard mutation: ${fragment}`,
+      `release workflow ${jobName} job must have the exact authority guard: ${condition}`
+    );
   }
 }
+
+verifyLinuxArtifactInspection(workflow);
+for (const tool of ["file", "readelf", "strings", "grep"]) {
+  const tools = ["file", "readelf", "strings", "grep"].filter((candidate) => candidate !== tool);
+  const weakened = workflow.replace(
+    "for tool in file readelf strings grep; do",
+    `for tool in ${tools.join(" ")}; do`
+  );
+  if (weakened === workflow) throw new Error("Linux tool availability mutation fixture not found");
+  expectFailure(
+    () => verifyLinuxArtifactInspection(weakened),
+    `missing ${tool} availability check mutation`,
+    "Linux artifact inspection must verify every required tool explicitly"
+  );
+}
+for (const invocation of [
+  'file relay-linux-x86_64 > "$diagnostics_dir/file.txt"',
+  'readelf -d relay-linux-x86_64 > "$diagnostics_dir/dynamic.txt"',
+  'readelf -l relay-linux-x86_64 > "$diagnostics_dir/program-headers.txt"',
+  'strings relay-linux-x86_64 > "$diagnostics_dir/strings.txt"'
+]) {
+  const weakened = workflow.replace(invocation, `${invocation} || true`);
+  if (weakened === workflow) throw new Error(`Linux diagnostic mutation fixture not found: ${invocation}`);
+  expectFailure(
+    () => verifyLinuxArtifactInspection(weakened),
+    `hidden ${invocation.split(" ")[0]} failure mutation`,
+    "Linux artifact diagnostic tools must run directly and capture output before inspection"
+  );
+}
+const withoutPipefail = workflow.replace("set -euo pipefail", "set -eu");
+if (withoutPipefail === workflow) throw new Error("Linux pipefail mutation fixture not found");
+expectFailure(
+  () => verifyLinuxArtifactInspection(withoutPipefail),
+  "missing Linux pipefail mutation",
+  "Linux artifact inspection must start in strict pipefail mode"
+);
+const hiddenGrepFailure = workflow.replace(
+  'grep -E "$pattern" "$input" >/dev/null || status=$?',
+  'grep -E "$pattern" "$input" >/dev/null || status=1'
+);
+if (hiddenGrepFailure === workflow) throw new Error("Linux grep failure mutation fixture not found");
+expectFailure(
+  () => verifyLinuxArtifactInspection(hiddenGrepFailure),
+  "hidden Linux grep failure mutation",
+  "Linux artifact negative checks must reject matches and grep errors"
+);
 const productionStatusInvocation = verifyReleaseSmokeGitStatusFixture(workflow, relayMain);
 const nonliteralStatusMutations = [
   [
@@ -308,11 +545,11 @@ const authoritativeJobClasses = [
   ]
 ];
 for (const [authorityClass, ownerJob, marker] of authoritativeJobClasses) {
-  const owner = jobBlock(workflow, ownerJob);
+  const owner = jobBlock(workflow, "release", ownerJob);
   if (!marker.test(owner)) {
     throw new Error(`release workflow has no recognized ${authorityClass} authority in ${ownerJob}`);
   }
-  if (!transitivelyNeeds(workflow, ownerJob, "release-contract")) {
+  if (!transitivelyNeeds(workflow, "release", ownerJob, "release-contract")) {
     throw new Error(`${authorityClass} authority must transitively depend on release-contract`);
   }
 }
@@ -325,12 +562,12 @@ const jobContracts = [
   [
     "archive",
     "archive attestation authority",
-    /  archive:\n    needs: release-contract\n    timeout-minutes: 35\n    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n/
+    /  archive:\n    if: github\.event_name == 'push' && github\.ref_type == 'tag'\n    needs: release-contract\n    timeout-minutes: 35\n    permissions:\n      attestations: write\n      contents: read\n      id-token: write\n/
   ],
   [
     "npm-packages",
     "packaging attestation read authority",
-    /  npm-packages:\n    needs: \[release-contract, archive\]\n    runs-on: ubuntu-22\.04\n    timeout-minutes: 20\n    permissions:\n      attestations: read\n      contents: read\n    steps:\n/
+    /  npm-packages:\n    if: github\.event_name == 'push' && github\.ref_type == 'tag'\n    needs: \[release-contract, archive\]\n    runs-on: ubuntu-22\.04\n    timeout-minutes: 20\n    permissions:\n      attestations: read\n      contents: read\n    steps:\n/
   ],
   [
     "npm-publish",
@@ -341,16 +578,6 @@ const jobContracts = [
     "archive",
     "portable Linux target with stable asset name",
     /- os: ubuntu-22\.04\n            asset: linux-x86_64\n            target: x86_64-unknown-linux-musl[\s\S]*cargo build --release --locked --target "\$\{\{ matrix\.target \}\}"[\s\S]*target\/\$\{\{ matrix\.target \}\}\/release\/relay"[\s\S]*file relay-linux-x86_64[\s\S]*--platform linux\/amd64[\s\S]*--network none[\s\S]*--read-only[\s\S]*--cap-drop ALL/
-  ],
-  [
-    "archive",
-    "dynamic and GLIBC rejection",
-    /file relay-linux-x86_64 \| grep -E 'x86-64\.\*static' >\/dev\/null[\s\S]*readelf -d relay-linux-x86_64 \| grep '\(NEEDED\)' >\/dev\/null[\s\S]*strings relay-linux-x86_64 \| grep -E 'GLIBC_\[0-9\]' >\/dev\/null/
-  ],
-  [
-    "archive",
-    "ELF interpreter rejection",
-    /if readelf -l relay-linux-x86_64 \| grep -E '[^'\n]*INTERP[^'\n]*' >\/dev\/null; then[\s\S]*Linux release artifact has an ELF interpreter segment/
   ],
   [
     "archive",
@@ -412,7 +639,7 @@ const jobContracts = [
 
 const jobBlocks = new Map();
 for (const [jobName, name, pattern] of jobContracts) {
-  if (!jobBlocks.has(jobName)) jobBlocks.set(jobName, jobBlock(workflow, jobName));
+  if (!jobBlocks.has(jobName)) jobBlocks.set(jobName, jobBlock(workflow, "release", jobName));
   if (!pattern.test(jobBlocks.get(jobName))) throw new Error(`release workflow violates ${name}`);
 }
 for (const runner of [
@@ -435,8 +662,12 @@ if (/\bNPM_TOKEN\b/.test(workflow)) {
   throw new Error("release workflow must not use a long-lived npm token");
 }
 
-const codeqlWorkflowPermissions = mappingEntries(codeqlWorkflow, "permissions:");
-const codeqlAnalyzePermissions = mappingEntries(jobBlock(codeqlWorkflow, "analyze"), "    permissions:");
+const codeqlWorkflowPermissions = mappingEntries(codeqlWorkflow, "codeql", "permissions:");
+const codeqlAnalyzePermissions = mappingEntries(
+  jobBlock(codeqlWorkflow, "codeql", "analyze"),
+  "codeql",
+  "    permissions:"
+);
 if (
   JSON.stringify(codeqlWorkflowPermissions) !== JSON.stringify(["  contents: read"]) ||
   JSON.stringify(codeqlAnalyzePermissions) !==

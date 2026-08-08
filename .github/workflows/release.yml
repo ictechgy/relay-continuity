@@ -41,6 +41,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
   archive:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: release-contract
     timeout-minutes: 35
     permissions:
@@ -79,20 +80,48 @@ jobs:
       - run: mv "target/${{ matrix.target }}/release/relay" "relay-${{ matrix.asset }}"
       - name: Reject dynamic, interpreted, or GLIBC-linked Linux artifacts
         if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
         run: |
-          file relay-linux-x86_64 | grep -E 'x86-64.*static' >/dev/null
-          if readelf -d relay-linux-x86_64 | grep '(NEEDED)' >/dev/null; then
-            echo "Linux release artifact has a dynamic dependency" >&2
-            exit 1
-          fi
-          if readelf -l relay-linux-x86_64 | grep -E '(^|[[:space:]])(PT_)?INTERP([[:space:]]|$)' >/dev/null; then
-            echo "Linux release artifact has an ELF interpreter segment" >&2
-            exit 1
-          fi
-          if strings relay-linux-x86_64 | grep -E 'GLIBC_[0-9]' >/dev/null; then
-            echo "Linux release artifact retains a GLIBC symbol contract" >&2
-            exit 1
-          fi
+          set -euo pipefail
+          for tool in file readelf strings grep; do
+            command -v "$tool" >/dev/null
+          done
+
+          diagnostics_dir="$(mktemp -d)"
+          trap 'rm -rf -- "$diagnostics_dir"' EXIT
+          file relay-linux-x86_64 > "$diagnostics_dir/file.txt"
+          readelf -d relay-linux-x86_64 > "$diagnostics_dir/dynamic.txt"
+          readelf -l relay-linux-x86_64 > "$diagnostics_dir/program-headers.txt"
+          strings relay-linux-x86_64 > "$diagnostics_dir/strings.txt"
+
+          grep -E 'x86-64.*static' "$diagnostics_dir/file.txt" >/dev/null
+          reject_pattern() {
+            local pattern="$1"
+            local input="$2"
+            local violation="$3"
+            local status=0
+            grep -E "$pattern" "$input" >/dev/null || status=$?
+            case "$status" in
+              0)
+                echo "$violation" >&2
+                return 1
+                ;;
+              1)
+                return 0
+                ;;
+              *)
+                echo "Linux artifact inspection failed while reading captured diagnostics" >&2
+                return 1
+                ;;
+            esac
+          }
+          reject_pattern '(NEEDED)' "$diagnostics_dir/dynamic.txt" \
+            "Linux release artifact has a dynamic dependency"
+          reject_pattern '(^|[[:space:]])(PT_)?INTERP([[:space:]]|$)' \
+            "$diagnostics_dir/program-headers.txt" \
+            "Linux release artifact has an ELF interpreter segment"
+          reject_pattern 'GLIBC_[0-9]' "$diagnostics_dir/strings.txt" \
+            "Linux release artifact retains a GLIBC symbol contract"
       - name: Smoke exact Linux artifact on supported distribution floor
         if: matrix.target == 'x86_64-unknown-linux-musl'
         shell: bash
@@ -144,6 +173,7 @@ jobs:
             relay-${{ matrix.asset }}
             relay-${{ matrix.asset }}.sha256
   npm-packages:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [release-contract, archive]
     runs-on: ubuntu-22.04
     timeout-minutes: 20
