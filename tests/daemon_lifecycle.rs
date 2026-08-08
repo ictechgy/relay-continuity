@@ -2,7 +2,7 @@ use rusqlite::Connection;
 #[cfg(unix)]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::{ffi::OsStrExt, io::AsRawFd};
+use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt, io::AsRawFd};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -2239,6 +2239,56 @@ fn nul_porcelain_preserves_space_paths_without_storing_source_content() {
     let bytes = fs::read(state_database(&root)).expect("read evidence");
     assert!(!String::from_utf8_lossy(&bytes).contains("private source body"));
     fs::remove_dir_all(root).expect("remove fixture");
+}
+
+#[cfg(unix)]
+#[test]
+fn observe_disables_optional_git_locks_for_read_only_queries() {
+    let root = git_fixture("git-optional-lock-test");
+    let _cleanup = FixtureCleanup(root.clone());
+    assert!(run(&root, &["init"]).status.success());
+    fs::write(root.join("queued.txt"), "queued while Git is writing").expect("write dirty fixture");
+    fs::write(root.join(".git/index.lock"), "owner-sentinel").expect("hold Git index lock");
+
+    let path = std::env::var_os("PATH").expect("test PATH");
+    let real_git = std::env::split_paths(&path)
+        .map(|directory| directory.join("git"))
+        .find(|candidate| candidate.is_file())
+        .expect("resolve real Git executable");
+    let wrapper_directory = root.join("git-wrapper-bin");
+    fs::create_dir(&wrapper_directory).expect("create Git wrapper directory");
+    let wrapper = wrapper_directory.join("git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nif [ \"${GIT_OPTIONAL_LOCKS:-}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write Git wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))
+        .expect("make Git wrapper executable");
+    let wrapped_path = std::env::join_paths(
+        std::iter::once(wrapper_directory).chain(std::env::split_paths(&path)),
+    )
+    .expect("build wrapped PATH");
+
+    let observed = Command::new(env!("CARGO_BIN_EXE_relay"))
+        .arg("observe")
+        .current_dir(&root)
+        .env("RELAY_STATE_HOME", test_state_home(&root))
+        .env("PATH", wrapped_path)
+        .env("RELAY_TEST_REAL_GIT", real_git)
+        .env_remove("GIT_OPTIONAL_LOCKS")
+        .output()
+        .expect("run Relay with Git environment guard");
+    assert!(
+        observed.status.success(),
+        "read-only observation competed for Git's index lock: {}",
+        String::from_utf8_lossy(&observed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(root.join(".git/index.lock")).expect("read Git index lock"),
+        "owner-sentinel",
+        "Relay must not replace or remove another Git process's lock"
+    );
 }
 
 #[test]

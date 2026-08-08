@@ -1482,10 +1482,14 @@ fn writer_lock(root: &Path) -> Result<WriterLock, Box<dyn std::error::Error>> {
 fn writer_busy(error: &dyn std::error::Error) -> bool {
     error.to_string() == "Relay writer is busy; retry without modifying evidence"
 }
+fn read_only_git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.current_dir(root).env("GIT_OPTIONAL_LOCKS", "0");
+    command
+}
 fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let ok = Command::new("git")
+    let ok = read_only_git_command(root)
         .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(root)
         .output()?;
     if !ok.status.success() || String::from_utf8_lossy(&ok.stdout).trim() != "true" {
         return Err("Relay requires a Git worktree; no evidence was written".into());
@@ -1494,9 +1498,8 @@ fn ensure_git(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 fn git_root(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     ensure_git(root)?;
-    let output = Command::new("git")
+    let output = read_only_git_command(root)
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(root)
         .output()?;
     if !output.status.success() {
         return Err("Relay requires a Git worktree; no evidence was written".into());
@@ -1734,9 +1737,8 @@ fn git_unavailable(error: &(dyn std::error::Error + 'static)) -> bool {
     error.downcast_ref::<GitUnavailable>().is_some()
 }
 fn git_bytes(root: &Path, args: &[&str]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let output = Command::new("git")
+    let output = read_only_git_command(root)
         .args(args)
-        .current_dir(root)
         .output()
         .map_err(|_| GitUnavailable)?;
     if !output.status.success() {
@@ -1748,17 +1750,15 @@ fn git(root: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>>
     Ok(String::from_utf8(git_bytes(root, args)?)?.trim().to_owned())
 }
 fn git_head(root: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let head = Command::new("git")
+    let head = read_only_git_command(root)
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .current_dir(root)
         .output()
         .map_err(|_| GitUnavailable)?;
     if head.status.success() {
         return Ok(String::from_utf8(head.stdout)?.trim().to_owned());
     }
-    let symbolic = Command::new("git")
+    let symbolic = read_only_git_command(root)
         .args(["symbolic-ref", "--quiet", "HEAD"])
-        .current_dir(root)
         .output()
         .map_err(|_| GitUnavailable)?;
     if symbolic.status.success() {
