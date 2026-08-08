@@ -1894,14 +1894,14 @@ impl IgnoreRules {
             || self.patterns.iter().any(|pattern| path.contains(pattern))
     }
 }
+const DIRTY_GIT_STATUS_ARGS: &[&str] =
+    &["status", "--porcelain=v1", "-z", "--untracked-files=normal"];
+
 fn dirty_entries_with_rules(
     root: &Path,
     ignore_rules: &IgnoreRules,
 ) -> Result<Vec<DirtyEntry>, Box<dyn std::error::Error>> {
-    let output = git_bytes(
-        root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-    )?;
+    let output = git_bytes(root, DIRTY_GIT_STATUS_ARGS)?;
     let fields = output.split(|byte| *byte == 0).collect::<Vec<_>>();
     let mut index = 0;
     let mut entries = Vec::new();
@@ -3376,26 +3376,6 @@ fn doctor_report() -> DoctorReport {
                 )
             }),
         );
-    } else if managed_state == DoctorManagedState::Missing {
-        checks.extend([
-            doctor_integration_check(
-                DoctorCheckName::IntegrationCodex,
-                DoctorReason::IntegrationDisabled,
-            ),
-            doctor_integration_check(
-                DoctorCheckName::IntegrationClaude,
-                DoctorReason::IntegrationDisabled,
-            ),
-            doctor_integration_check(
-                DoctorCheckName::IntegrationGrok,
-                DoctorReason::IntegrationDisabled,
-            ),
-            DoctorCheck::new(
-                DoctorCheckName::Capture,
-                DoctorCheckState::Pass,
-                DoctorReason::CaptureNotRunning,
-            ),
-        ]);
     } else {
         checks.extend([
             doctor_integration_check(
@@ -3410,8 +3390,16 @@ fn doctor_report() -> DoctorReport {
                 DoctorCheckName::IntegrationGrok,
                 doctor_integration_state(&root, "grok"),
             ),
-            doctor_capture_check(&root),
         ]);
+        checks.push(if managed_state == DoctorManagedState::Missing {
+            DoctorCheck::new(
+                DoctorCheckName::Capture,
+                DoctorCheckState::Pass,
+                DoctorReason::CaptureNotRunning,
+            )
+        } else {
+            doctor_capture_check(&root)
+        });
     }
     checks.push(doctor_service_check(&root));
     DoctorReport { checks }

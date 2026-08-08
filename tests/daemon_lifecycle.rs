@@ -648,6 +648,88 @@ fn doctor_and_unknown_commands_do_not_initialize_a_fresh_git_repository() {
 
 #[cfg(unix)]
 #[test]
+fn doctor_detects_relay_owned_codex_hook_when_managed_directory_is_missing_without_mutation() {
+    let sensitive = "ghp_orphaned_hook_secret";
+    let root = git_fixture(sensitive);
+    let _root_cleanup = FixtureCleanup(root.clone());
+    let state_home = fs::canonicalize(std::env::temp_dir())
+        .expect("canonical temporary directory")
+        .join(format!(
+            "relay-doctor-orphaned-hook-state-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+    let _state_cleanup = FixtureCleanup(state_home.clone());
+    let initialized = run_with_state_home(&root, &["init"], &state_home);
+    assert!(
+        initialized.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&initialized.stderr)
+    );
+    let installed = run_with_state_home(
+        &root,
+        &["integration", "codex", "install", "--apply"],
+        &state_home,
+    );
+    assert!(
+        installed.status.success(),
+        "Codex integration install failed: {}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+
+    let hook_path = root.join(".codex/hooks.json");
+    let hook_before = fs::read(&hook_path).expect("read Relay-owned Codex hook");
+    let codex_entries_before = directory_entry_names(root.join(".codex").as_path());
+    let database = state_database_at(&root, &state_home);
+    let database_before = fs::read(&database).expect("read initialized evidence");
+    let evidence_entries_before =
+        directory_entry_names(database.parent().expect("evidence parent"));
+    let state_entries_before = directory_entry_names(&state_home);
+    fs::remove_dir_all(root.join(".relay")).expect("remove entire managed directory fixture");
+    assert!(!root.join(".relay").exists());
+
+    let output = run_with_state_home(&root, &["doctor", "--json"], &state_home);
+
+    assert_eq!(output.status.code(), Some(1));
+    let body = assert_doctor_json(&output);
+    assert!(body.contains(
+        "\"name\":\"managed_state\",\"state\":\"warning\",\"reason\":\"managed-state-not-initialized\""
+    ));
+    assert!(body.contains(
+        "\"name\":\"integration_codex\",\"state\":\"warning\",\"reason\":\"integration-unowned-hook\""
+    ));
+    assert!(
+        body.contains("\"name\":\"capture\",\"state\":\"pass\",\"reason\":\"capture-not-running\"")
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!body.contains(sensitive));
+    assert!(!body.contains(&root.to_string_lossy().into_owned()));
+    assert!(!stderr.contains(sensitive));
+    assert!(!stderr.contains(&root.to_string_lossy().into_owned()));
+    assert!(!root.join(".relay").exists());
+    assert_eq!(
+        fs::read(&hook_path).expect("re-read Relay-owned Codex hook"),
+        hook_before
+    );
+    assert_eq!(
+        directory_entry_names(root.join(".codex").as_path()),
+        codex_entries_before
+    );
+    assert_eq!(
+        fs::read(&database).expect("re-read initialized evidence"),
+        database_before
+    );
+    assert_eq!(
+        directory_entry_names(database.parent().expect("evidence parent")),
+        evidence_entries_before
+    );
+    assert_eq!(directory_entry_names(&state_home), state_entries_before);
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_reports_a_healthy_initialized_repository_without_mutating_state() {
     let root = git_fixture("doctor-healthy-test");
     let _root_cleanup = FixtureCleanup(root.clone());
@@ -2476,11 +2558,12 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
     let wrapper_directory = root.join("git-wrapper-bin");
     fs::create_dir(&wrapper_directory).expect("create Git wrapper directory");
     let wrapper = wrapper_directory.join("git");
+    let status_log = root.join("relay-git-status-args.log");
     let guarded_variables = GIT_REPOSITORY_ENV_REMOVALS.join(" ");
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nfor variable in {guarded_variables}; do\n  eval \"value=\\${{$variable-}}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${{GIT_OPTIONAL_LOCKS:-}}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${{GIT_NO_LAZY_FETCH:-}}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${{GIT_ASKPASS:-}}\" != \"preserve-sentinel\" ] || [ \"${{GIT_CONFIG_GLOBAL:-}}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n"
+            "#!/bin/sh\nfor variable in {guarded_variables}; do\n  eval \"value=\\${{$variable-}}\"\n  if [ -n \"$value\" ]; then\n    echo \"Relay leaked repository override $variable\" >&2\n    exit 96\n  fi\ndone\nif [ \"${{GIT_OPTIONAL_LOCKS:-}}\" != \"0\" ]; then\n  echo 'Relay did not disable optional Git locks' >&2\n  exit 97\nfi\nif [ \"${{GIT_NO_LAZY_FETCH:-}}\" != \"1\" ]; then\n  echo 'Relay did not disable lazy object fetching' >&2\n  exit 98\nfi\nif [ \"${{GIT_ASKPASS:-}}\" != \"preserve-sentinel\" ] || [ \"${{GIT_CONFIG_GLOBAL:-}}\" != \"$RELAY_TEST_GIT_CONFIG_GLOBAL\" ]; then\n  echo 'Relay removed unrelated Git configuration' >&2\n  exit 99\nfi\nif [ \"${{1:-}}\" = \"status\" ]; then\n  printf '%s\\n' \"$*\" > \"$RELAY_TEST_GIT_STATUS_LOG\"\nfi\nexec \"$RELAY_TEST_REAL_GIT\" \"$@\"\n"
         ),
     )
     .expect("write Git wrapper");
@@ -2502,6 +2585,7 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
         .env("PATH", wrapped_path)
         .env("RELAY_TEST_REAL_GIT", real_git)
         .env("RELAY_TEST_GIT_CONFIG_GLOBAL", &preserved_config)
+        .env("RELAY_TEST_GIT_STATUS_LOG", &status_log)
         .env("GIT_ASKPASS", "preserve-sentinel")
         .env("GIT_CONFIG_GLOBAL", &preserved_config)
         .env_remove("GIT_OPTIONAL_LOCKS")
@@ -2516,6 +2600,11 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
         observed.status.success(),
         "read-only observation competed for Git's index lock: {}",
         String::from_utf8_lossy(&observed.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&status_log).expect("read observed Git status arguments"),
+        include_str!("fixtures/dirty-git-status-args.txt"),
+        "Relay production Git status arguments drifted from the release smoke contract"
     );
     assert_eq!(
         fs::read_to_string(root.join(".git/index.lock")).expect("read Git index lock"),
