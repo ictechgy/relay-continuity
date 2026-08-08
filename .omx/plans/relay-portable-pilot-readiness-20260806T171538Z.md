@@ -190,8 +190,10 @@
 
 ### Observability and performance
 
-- Record exact commands, test counts, artifact hashes, workflow run IDs, review
-  heads, and terminal verdicts in append-only durable evidence.
+- Persist only allowlisted command identifiers plus redacted, normalized
+  argument summaries or hashes; never persist raw command lines, credentials,
+  or filesystem paths. Record test counts, artifact hashes, workflow run IDs,
+  review heads, and terminal verdicts in append-only durable evidence.
 - Doctor is bounded to a small fixed number of metadata reads and Git root
   probes, performs no database scan/quick-check, and completes under a generous
   local budget (target under 250 ms in fixtures, treated as diagnostic evidence
