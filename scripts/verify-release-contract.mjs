@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
 import { constants as fsConstants } from "node:fs";
-import { appendFile, lstat, open } from "node:fs/promises";
-import { resolve } from "node:path";
+import { appendFile, lstat, open, realpath } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const usage =
   "usage: verify-release-contract.mjs --cargo <Cargo.toml> --event-name <push|workflow_dispatch> --ref-type <tag|branch> --ref-name <ref> [--github-output <path>]";
 const maximumCargoBytes = 1024 * 1024;
+const maximumMetadataBytes = 1024 * 1024;
+const cargoMetadataTimeoutMilliseconds = 15_000;
 
 function readArguments(argv) {
   const result = {};
@@ -28,25 +31,6 @@ function readArguments(argv) {
   return result;
 }
 
-export function cargoPackageVersion(contents) {
-  if (Buffer.byteLength(contents, "utf8") > maximumCargoBytes) {
-    throw new Error("Cargo.toml exceeds the release contract size limit");
-  }
-  const packageSection = contents.match(
-    /(?:^|\n)\[package\][ \t]*(?:#[^\r\n]*)?\r?\n([\s\S]*?)(?=\r?\n\[[^\]\r\n]+\][ \t]*(?:#[^\r\n]*)?(?:\r?\n|$)|$)/
-  );
-  if (!packageSection) throw new Error("Cargo.toml has no [package] section");
-  const versions = [
-    ...packageSection[1].matchAll(
-      /^[ \t]*version[ \t]*=[ \t]*(?:"([0-9A-Za-z.+-]+)"|'([0-9A-Za-z.+-]+)')[ \t]*(?:#[^\r\n]*)?\r?$/gm
-    )
-  ];
-  if (versions.length !== 1) {
-    throw new Error("Cargo.toml [package] must contain exactly one literal version");
-  }
-  return versions[0][1] ?? versions[0][2];
-}
-
 function sameFile(left, right) {
   return (
     left.dev === right.dev &&
@@ -57,9 +41,77 @@ function sameFile(left, right) {
   );
 }
 
+function cargoMetadata(cargoPath) {
+  const result = spawnSync(
+    "cargo",
+    [
+      "metadata",
+      "--format-version",
+      "1",
+      "--no-deps",
+      "--frozen",
+      "--manifest-path",
+      cargoPath
+    ],
+    {
+      cwd: dirname(cargoPath),
+      encoding: null,
+      env: { ...process.env, CARGO_TERM_COLOR: "never" },
+      killSignal: "SIGKILL",
+      maxBuffer: maximumMetadataBytes + 1,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: cargoMetadataTimeoutMilliseconds,
+      windowsHide: true
+    }
+  );
+
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error("Cargo metadata exceeded the release contract time limit");
+  }
+  if (
+    result.error?.code === "ENOBUFS" ||
+    result.stdout?.length > maximumMetadataBytes ||
+    result.stderr?.length > maximumMetadataBytes
+  ) {
+    throw new Error("Cargo metadata exceeded the release contract output limit");
+  }
+  if (result.error || result.status !== 0) {
+    throw new Error("Cargo metadata could not resolve the validated manifest");
+  }
+
+  try {
+    return JSON.parse(result.stdout.toString("utf8"));
+  } catch {
+    throw new Error("Cargo metadata returned an invalid release contract response");
+  }
+}
+
+function packageVersionFromMetadata(metadata, cargoPath) {
+  if (!metadata || metadata.version !== 1 || !Array.isArray(metadata.packages)) {
+    throw new Error("Cargo metadata returned an invalid release contract response");
+  }
+  const packages = metadata.packages.filter(
+    (entry) => entry && entry.manifest_path === cargoPath
+  );
+  if (packages.length !== 1) {
+    throw new Error(
+      "Cargo metadata did not return exactly one package for the validated manifest"
+    );
+  }
+  if (typeof packages[0].version !== "string") {
+    throw new Error("Cargo metadata returned an invalid release contract response");
+  }
+  return packages[0].version;
+}
+
 export async function readCargoPackageVersion(path) {
-  const cargoPath = resolve(path);
-  const before = await lstat(cargoPath);
+  const requestedCargoPath = resolve(path);
+  let before;
+  try {
+    before = await lstat(requestedCargoPath);
+  } catch {
+    throw new Error("Cargo.toml could not be inspected safely");
+  }
   if (before.isSymbolicLink() || !before.isFile() || before.size > maximumCargoBytes) {
     throw new Error("Cargo.toml must be a regular non-symlink file within the size limit");
   }
@@ -67,24 +119,54 @@ export async function readCargoPackageVersion(path) {
     throw new Error("release contract requires no-follow file support");
   }
 
-  const handle = await open(cargoPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  let handle;
+  try {
+    handle = await open(requestedCargoPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch {
+    throw new Error("Cargo.toml could not be opened safely");
+  }
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.size > maximumCargoBytes || !sameFile(before, opened)) {
       throw new Error("Cargo.toml changed or became unsafe before it was opened");
     }
-    const bytes = Buffer.alloc(opened.size + 1);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const result = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (result.bytesRead === 0) break;
-      offset += result.bytesRead;
+
+    let cargoPath;
+    let canonical;
+    try {
+      cargoPath = await realpath(requestedCargoPath);
+      canonical = await lstat(cargoPath);
+    } catch {
+      throw new Error("Cargo.toml changed or became unsafe before metadata was read");
     }
-    const after = await handle.stat();
-    if (offset !== opened.size || !sameFile(opened, after)) {
-      throw new Error("Cargo.toml changed while it was being read");
+    if (!canonical.isFile() || canonical.isSymbolicLink() || !sameFile(opened, canonical)) {
+      throw new Error("Cargo.toml changed or became unsafe before metadata was read");
     }
-    return cargoPackageVersion(bytes.subarray(0, offset).toString("utf8"));
+
+    const metadata = cargoMetadata(cargoPath);
+
+    let after;
+    let requestedAfter;
+    let cargoPathAfter;
+    try {
+      after = await handle.stat();
+      requestedAfter = await lstat(requestedCargoPath);
+      cargoPathAfter = await realpath(requestedCargoPath);
+    } catch {
+      throw new Error("Cargo.toml changed or became unsafe while metadata was read");
+    }
+    if (
+      !after.isFile() ||
+      !requestedAfter.isFile() ||
+      requestedAfter.isSymbolicLink() ||
+      cargoPathAfter !== cargoPath ||
+      !sameFile(opened, after) ||
+      !sameFile(opened, requestedAfter)
+    ) {
+      throw new Error("Cargo.toml changed or became unsafe while metadata was read");
+    }
+
+    return packageVersionFromMetadata(metadata, cargoPath);
   } finally {
     await handle.close();
   }

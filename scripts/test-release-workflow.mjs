@@ -2,6 +2,7 @@
 
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -9,7 +10,18 @@ const workflow = await readFile(resolve(root, ".github/workflows/release.yml"), 
 const ciWorkflow = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
 const codeqlWorkflow = await readFile(resolve(root, ".github/workflows/codeql.yml"), "utf8");
 const codeqlConfig = await readFile(resolve(root, ".github/codeql/codeql-config.yml"), "utf8");
-const relayMain = await readFile(resolve(root, "src/main.rs"), "utf8");
+const dirtyGitStatusContract = await readFile(
+  resolve(root, "tests/fixtures/dirty-git-status-args.txt"),
+  "utf8"
+);
+if (
+  !dirtyGitStatusContract.endsWith("\n") ||
+  dirtyGitStatusContract.includes("\r") ||
+  dirtyGitStatusContract.slice(0, -1).includes("\n")
+) {
+  throw new Error("dirty Git status argument contract must be one LF-terminated line");
+}
+const dirtyGitStatusInvocation = dirtyGitStatusContract.slice(0, -1);
 
 function jobBlock(source, sourceName, name) {
   const lines = source.split(/\r?\n/);
@@ -88,6 +100,18 @@ function verifyPinnedNode24(source, sourceName, name) {
   }
 }
 
+function verifyPinnedRustToolchain(source, sourceName, name) {
+  const job = jobBlock(source, sourceName, name);
+  const matches = job.match(
+    /- uses: dtolnay\/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1\.97\.1\n        with:\n          toolchain: 1\.97\.1/g
+  ) ?? [];
+  if (matches.length !== 1) {
+    throw new Error(
+      `${sourceName} workflow ${name} job must select Rust 1.97.1 with the reviewed immutable rust-toolchain pin`
+    );
+  }
+}
+
 function verifyRemoteActionPin(value, location) {
   if (value.startsWith("./")) return;
   if (value.startsWith("docker://")) {
@@ -100,6 +124,137 @@ function verifyRemoteActionPin(value, location) {
   if (!remote || !remote[1].includes("/")) {
     throw new Error(`${location} must pin every remote action to a full 40-hex commit SHA`);
   }
+}
+
+function blockScalarIndentation(source) {
+  const match = source.match(
+    /^( *)(?:- )?(?:[A-Za-z0-9_.-]+|"(?:\\.|[^"\\])*"|'(?:''|[^'])*'): +[|>](?:[+-]|[1-9]|[+-][1-9]|[1-9][+-])? *$/
+  );
+  return match?.[1].length;
+}
+
+const semanticUsesParser = String.raw`
+require "json"
+require "yaml"
+
+source = STDIN.read
+stream = Psych.parse_stream(source)
+raise "workflow must contain exactly one YAML document" unless stream.children.length == 1
+document = YAML.safe_load(
+  source,
+  permitted_classes: [],
+  permitted_symbols: [],
+  aliases: true
+)
+uses = []
+active = {}
+walk = nil
+walk = lambda do |node|
+  case node
+  when Hash
+    identity = node.object_id
+    raise "recursive YAML alias" if active[identity]
+    active[identity] = true
+    begin
+      node.each do |key, value|
+        uses << value if key == "uses"
+        walk.call(key)
+        walk.call(value)
+      end
+    ensure
+      active.delete(identity)
+    end
+  when Array
+    identity = node.object_id
+    raise "recursive YAML alias" if active[identity]
+    active[identity] = true
+    begin
+      node.each { |value| walk.call(value) }
+    ensure
+      active.delete(identity)
+    end
+  end
+end
+walk.call(document)
+STDOUT.write(JSON.generate(uses))
+`;
+
+function semanticWorkflowUses(source, sourceName) {
+  if (Buffer.byteLength(source, "utf8") > 1024 * 1024) {
+    throw new Error(`${sourceName} workflow exceeds the YAML verification size limit`);
+  }
+  const result = spawnSync("ruby", ["--disable-gems", "-EUTF-8:UTF-8", "-e", semanticUsesParser], {
+    encoding: "utf8",
+    env: {
+      PATH: process.env.PATH ?? "",
+      RUBYLIB: "",
+      RUBYOPT: ""
+    },
+    input: source,
+    killSignal: "SIGKILL",
+    maxBuffer: 1024 * 1024,
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 5_000,
+    windowsHide: true
+  });
+  if (result.error?.code === "ETIMEDOUT") {
+    throw new Error(`${sourceName} workflow YAML verification timed out`);
+  }
+  if (result.error?.code === "ENOBUFS") {
+    throw new Error(`${sourceName} workflow YAML verification exceeded its output limit`);
+  }
+  if (result.error || result.status !== 0) {
+    throw new Error(`${sourceName} workflow is not safe, single-document YAML`);
+  }
+  let uses;
+  try {
+    uses = JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`${sourceName} workflow YAML verifier returned an invalid response`);
+  }
+  if (!Array.isArray(uses) || uses.some((value) => typeof value !== "string")) {
+    throw new Error(`${sourceName} workflow has a non-string uses value`);
+  }
+  return uses;
+}
+
+function canonicalWorkflowUses(source, sourceName) {
+  const entries = [];
+  let blockScalarIndentationLevel;
+  for (const [index, line] of source.split(/\r?\n/).entries()) {
+    if (blockScalarIndentationLevel !== undefined) {
+      if (!line.trim() || line.trimStart().startsWith("#")) continue;
+      const indentation = line.length - line.trimStart().length;
+      if (indentation > blockScalarIndentationLevel) continue;
+      blockScalarIndentationLevel = undefined;
+    }
+
+    const uses = line.match(
+      /^ *(?:- )?uses: ([^#\s][^#]*?)(?:[ \t]+#[ \t]*(.*?))?[ \t]*$/
+    );
+    if (uses) {
+      entries.push({
+        value: uses[1].trim(),
+        comment: uses[2]?.trim(),
+        location: `${sourceName} workflow line ${index + 1}`
+      });
+    }
+    blockScalarIndentationLevel = blockScalarIndentation(line);
+  }
+  return entries;
+}
+
+function verifiedWorkflowUses(source, sourceName) {
+  const entries = canonicalWorkflowUses(source, sourceName);
+  const semantic = semanticWorkflowUses(source, sourceName);
+  if (
+    entries.length !== semantic.length ||
+    entries.some(({ value }, index) => value !== semantic[index])
+  ) {
+    throw new Error(`${sourceName} workflow has a non-canonical or indirect uses mapping`);
+  }
+  for (const { value, location } of entries) verifyRemoteActionPin(value, location);
+  return entries;
 }
 
 const tagPushCondition = "github.event_name == 'push' && github.ref_type == 'tag'";
@@ -253,40 +408,6 @@ function verifyLinuxArtifactInspection(source) {
   }
 }
 
-function productionGitStatusArgs(source) {
-  const functionMatch = source.match(
-    /fn dirty_entries_with_rules\([\s\S]*?\n}\nfn dirty_entries\(/
-  );
-  if (!functionMatch) {
-    throw new Error("production dirty-entry function could not be isolated");
-  }
-  const functionSource = functionMatch[0];
-  const stringLiteral = /"(?:\\.|[^"\\])*"/g;
-  const invocationCount = functionSource.match(/\bgit_bytes\s*\(/g)?.length ?? 0;
-  const calls = [
-    ...functionSource.matchAll(
-      /\bgit_bytes\(\s*root\s*,\s*&\[(?<arguments>[\s\S]*?)\]\s*,?\s*\)/g
-    )
-  ];
-  if (calls.length !== invocationCount) {
-    throw new Error("production git_bytes arguments must use a literal string slice");
-  }
-  const statusCalls = calls
-    .map(({ groups }) => {
-      const rawArguments = groups.arguments;
-      if (rawArguments.replace(stringLiteral, "").replace(/[\s,]/g, "") !== "") {
-        throw new Error("production git_bytes slice contains a nonliteral argument");
-      }
-      return [...rawArguments.matchAll(stringLiteral)].map(([literal]) => JSON.parse(literal));
-    })
-    .filter((args) => args[0] === "status" && args.includes("--porcelain=v1"));
-
-  if (statusCalls.length !== 1) {
-    throw new Error(`expected exactly one production porcelain Git status call, found ${statusCalls.length}`);
-  }
-  return statusCalls[0];
-}
-
 function verifyNoFloatingRunnerLabels(source, sourceName) {
   for (const [index, line] of source.split(/\r?\n/).entries()) {
     const match = line.match(/^\s*runs-on:\s*(.*?)\s*(?:#.*)?$/);
@@ -297,8 +418,7 @@ function verifyNoFloatingRunnerLabels(source, sourceName) {
   }
 }
 
-function verifyReleaseSmokeGitStatusFixture(workflowSource, rustSource) {
-  const expected = productionGitStatusArgs(rustSource).join(" ");
+function verifyReleaseSmokeGitStatusFixture(workflowSource, expected) {
   const archiveJob = jobBlock(workflowSource, "release", "archive");
   if ((archiveJob.match(/^\s*'case "\$\*" in'\s*\\\s*$/gm) ?? []).length !== 1) {
     throw new Error("release smoke fake Git fixture must match the complete argument vector");
@@ -320,6 +440,7 @@ function verifyReleaseSmokeGitStatusFixture(workflowSource, rustSource) {
 
 const githubActionPins = new Map([
   ["actions/checkout", { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", version: "v7.0.1" }],
+  ["dtolnay/rust-toolchain", { sha: "2c7215f132e9ebf062739d9130488b56d53c060c", version: "1.97.1" }],
   ["actions/upload-artifact", { sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", version: "v7.0.1" }],
   ["actions/download-artifact", { sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", version: "v8.0.1" }],
   ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0" }],
@@ -335,19 +456,13 @@ for (const [sourceName, source] of [
   ["codeql", codeqlWorkflow]
 ]) {
   verifyNoFloatingRunnerLabels(source, sourceName);
-  for (const [index, line] of source.split(/\r?\n/).entries()) {
-    const uses = line.match(/^\s*(?:-\s*)?uses\s*:\s*(?:"([^"]*)"|'([^']*)'|([^#]*?))(?:\s+#\s*(.*?)\s*)?$/);
-    if (!uses) continue;
-
-    const value = (uses[1] ?? uses[2] ?? uses[3]).trim();
-    const comment = uses[4]?.trim();
-    verifyRemoteActionPin(value, `${sourceName} workflow line ${index + 1}`);
+  for (const { value, comment, location } of verifiedWorkflowUses(source, sourceName)) {
     const action = [...githubActionPins.keys()].find((candidate) => value.startsWith(`${candidate}@`));
     if (!action) continue;
 
     const approved = githubActionPins.get(action);
     if (value !== `${action}@${approved.sha}` || comment !== approved.version) {
-      throw new Error(`${sourceName} workflow line ${index + 1} uses an unapproved ${action} pin`);
+      throw new Error(`${location} uses an unapproved ${action} pin`);
     }
     actionCounts.set(action, actionCounts.get(action) + 1);
   }
@@ -365,6 +480,22 @@ for (const [action, approved] of githubActionPins) {
 verifyPinnedNode24(ciWorkflow, "ci", "test");
 verifyPinnedNode24(workflow, "release", "release-contract");
 verifyPinnedNode24(workflow, "release", "npm-publish");
+verifyPinnedRustToolchain(workflow, "release", "release-contract");
+const releaseContractWithoutRustToolchain = mutateJobBlock(
+  workflow,
+  "release",
+  "release-contract",
+  (job) =>
+    job.replace(
+      "      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.97.1\n        with:\n          toolchain: 1.97.1\n",
+      ""
+    )
+);
+expectFailure(
+  () => verifyPinnedRustToolchain(releaseContractWithoutRustToolchain, "release", "release-contract"),
+  "missing release-contract Rust toolchain mutation",
+  "release workflow release-contract job must select Rust 1.97.1 with the reviewed immutable rust-toolchain pin"
+);
 verifyRemoteActionPin(`docker://example.invalid/image@sha256:${"a".repeat(64)}`, "fixture");
 for (const value of ["docker://example.invalid/image:latest", "docker://example.invalid/image@main"]) {
   try {
@@ -373,6 +504,197 @@ for (const value of ["docker://example.invalid/image:latest", "docker://example.
   } catch (error) {
     if (error.message.startsWith("mutable docker action unexpectedly passed")) throw error;
   }
+}
+
+for (const sourceName of ["ci", "release", "codeql"]) {
+  expectFailure(
+    () =>
+      verifiedWorkflowUses(
+        "jobs:\n  fixture:\n    steps:\n      - { uses: example/unsafe@main }\n",
+        sourceName
+      ),
+    `${sourceName} flow-style uses mutation`,
+    `${sourceName} workflow has a non-canonical or indirect uses mapping`
+  );
+}
+
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      "jobs:\n  fixture:\n    steps:\n      - uses: example/unsafe@main\n",
+      "fixture"
+    ),
+  "canonical unpinned uses mutation",
+  "fixture workflow line 4 must pin every remote action to a full 40-hex commit SHA"
+);
+for (const [label, source] of [
+  [
+    "folded block scalar uses value",
+    "jobs:\n  fixture:\n    steps:\n      - uses: >-\n          example/unsafe@main\n"
+  ],
+  [
+    "literal block scalar uses value",
+    "jobs:\n  fixture:\n    steps:\n      - uses: |\n          example/unsafe@main\n"
+  ],
+  [
+    "anchored uses value",
+    "jobs:\n  fixture:\n    steps:\n      - uses: &unsafe example/unsafe@main\n"
+  ],
+  [
+    "tagged uses value",
+    "jobs:\n  fixture:\n    steps:\n      - uses: !!str example/unsafe@main\n"
+  ],
+  [
+    "folded block scalar explicit uses key",
+    "jobs:\n  fixture:\n    steps:\n      - ? >-\n          uses\n        : example/unsafe@main\n"
+  ],
+  [
+    "aliased uses mapping key",
+    "env:\n  ACTION_KEY: &action_key uses\njobs:\n  fixture:\n    steps:\n      - *action_key: example/unsafe@main\n"
+  ],
+  [
+    "block scalar anchored uses mapping key",
+    "env:\n  ACTION_KEY: &action_key |-\n    uses\njobs:\n  fixture:\n    steps:\n      - *action_key: example/unsafe@main\n"
+  ],
+  [
+    "flow-style aliased uses mapping key",
+    "env:\n  ACTION_KEY: &action_key uses\njobs:\n  fixture:\n    steps:\n      - { *action_key: example/unsafe@main }\n"
+  ],
+  [
+    "aliased uses value",
+    "env:\n  ACTION: &action example/unsafe@main\njobs:\n  fixture:\n    steps:\n      - uses: *action\n"
+  ],
+  [
+    "duplicate uses keys",
+    `jobs:\n  fixture:\n    steps:\n      - uses: example/unsafe@main\n        uses: example/other@${"a".repeat(40)}\n`
+  ]
+]) {
+  expectFailure(
+    () => verifiedWorkflowUses(source, "fixture"),
+    `${label} mutation`,
+    "fixture workflow has a non-canonical or indirect uses mapping"
+  );
+}
+for (const [label, line] of [
+  ["double-quoted key", '      - "uses": example/unsafe@main'],
+  ["long-Unicode-escaped key", '      - "\\U00000075ses": example/unsafe@main'],
+  ["single-quoted key", "      - 'uses': example/unsafe@main"],
+  ["spaced key separator", "      - uses : example/unsafe@main"]
+]) {
+  expectFailure(
+    () => verifiedWorkflowUses(`jobs:\n  fixture:\n    steps:\n${line}\n`, "fixture"),
+    `${label} uses mutation`,
+    "fixture workflow has a non-canonical or indirect uses mapping"
+  );
+}
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      "jobs:\n  fixture:\n    steps:\n      - ? uses\n        : example/unsafe@main\n",
+      "fixture"
+    ),
+  "explicit key uses mutation",
+  "fixture workflow has a non-canonical or indirect uses mapping"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      'jobs:\n  fixture:\n    steps:\n      - "\\cuses": example/unsafe@main\n',
+      "fixture"
+    ),
+  "invalid YAML escape in a quoted mapping key",
+  "fixture workflow is not safe, single-document YAML"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      [
+        "jobs:",
+        "  fixture:",
+        "    steps:",
+        `      - ? "u${"\\"}`,
+        '          ses"',
+        "        : example/unsafe@main",
+        ""
+      ].join("\n"),
+      "fixture"
+    ),
+  "multiline quoted explicit uses key",
+  "fixture workflow has a non-canonical or indirect uses mapping"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      "jobs:\n  fixture:\n    steps:\n      - ? |-\n          uses\n        : example/unsafe@main\n",
+      "fixture"
+    ),
+  "block scalar explicit uses key",
+  "fixture workflow has a non-canonical or indirect uses mapping"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      "jobs:\n  fixture:\n    steps:\n      - uses:\n          action: example/unsafe@main\n",
+      "fixture"
+    ),
+  "non-string uses value",
+  "fixture workflow has a non-string uses value"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      `jobs:\n  fixture:\n    steps:\n      - uses: example/safe@${"a".repeat(40)}\n---\njobs: {}\n`,
+      "fixture"
+    ),
+  "multiple YAML documents",
+  "fixture workflow is not safe, single-document YAML"
+);
+expectFailure(
+  () => verifiedWorkflowUses("fixture: &fixture\n  - *fixture\n", "fixture"),
+  "recursive YAML alias",
+  "fixture workflow is not safe, single-document YAML"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      "jobs:\n  fixture:\n    steps:\n      - {\n          uses: example/unsafe@main\n        }\n",
+      "fixture"
+    ),
+  "multiline flow-style uses mutation",
+  "fixture workflow line 5 must pin every remote action to a full 40-hex commit SHA"
+);
+expectFailure(
+  () =>
+    verifiedWorkflowUses(
+      "jobs:\n  fixture:\n    steps:\n      - { name: Don't, uses: example/unsafe@main }\n",
+      "fixture"
+    ),
+  "plain scalar apostrophe before flow-style uses mutation",
+  "fixture workflow has a non-canonical or indirect uses mapping"
+);
+const nonSemanticUses = verifiedWorkflowUses(
+  [
+    "# - { uses: example/comment@main }",
+    "jobs:",
+    "  fixture:",
+    "    steps:",
+    "      # Don't mistake this comment for uses: example/comment@main",
+    '      - name: "a benign',
+    '          multiline quoted scalar"',
+    '      - name: "uses: example/quoted-scalar@main"',
+    "        run: |",
+    "          echo 'uses: example/literal@main'",
+    "          # uses: example/literal-comment@main",
+    "          printf '%s\\n' '*action_key: example/literal-alias@main'",
+    "          printf '%s\\n' '- { uses: example/literal-flow@main }'",
+    '      - "run": >-',
+    "          echo 'uses: example/quoted-run-key@main'",
+    "      - uses: ./local-action"
+  ].join("\n"),
+  "fixture"
+);
+if (nonSemanticUses.length !== 1 || nonSemanticUses[0].value !== "./local-action") {
+  throw new Error("workflow uses parser mistook comments or literal run-script contents for keys");
 }
 
 for (const sourceName of ["ci", "release", "codeql"]) {
@@ -473,36 +795,10 @@ expectFailure(
   "hidden Linux grep failure mutation",
   "Linux artifact negative checks must reject matches and grep errors"
 );
-const productionStatusInvocation = verifyReleaseSmokeGitStatusFixture(workflow, relayMain);
-const nonliteralStatusMutations = [
-  [
-    relayMain.replace('"--untracked-files=normal"', "git_status_mode()"),
-    "production git_bytes slice contains a nonliteral argument"
-  ],
-  [
-    relayMain.replace(
-      '&["status", "--porcelain=v1", "-z", "--untracked-files=normal"]',
-      "git_status_args()"
-    ),
-    "production git_bytes arguments must use a literal string slice"
-  ]
-];
-for (const [mutatedSource, expectedError] of nonliteralStatusMutations) {
-  if (mutatedSource === relayMain) {
-    throw new Error("production Git status nonliteral mutation fixture not found");
-  }
-  try {
-    productionGitStatusArgs(mutatedSource);
-    throw new Error("nonliteral production Git status argument unexpectedly passed");
-  } catch (error) {
-    if (error.message === "nonliteral production Git status argument unexpectedly passed") throw error;
-    if (error.message !== expectedError) {
-      throw new Error(
-        `nonliteral production Git status mutation failed for the wrong reason: ${error.message}`
-      );
-    }
-  }
-}
+const productionStatusInvocation = verifyReleaseSmokeGitStatusFixture(
+  workflow,
+  dirtyGitStatusInvocation
+);
 const driftedWorkflow = workflow.replace(
   productionStatusInvocation,
   `${productionStatusInvocation} --fixture-drift`
@@ -510,12 +806,11 @@ const driftedWorkflow = workflow.replace(
 if (driftedWorkflow === workflow) {
   throw new Error("release smoke Git status mutation fixture not found");
 }
-try {
-  verifyReleaseSmokeGitStatusFixture(driftedWorkflow, relayMain);
-  throw new Error("drifted release smoke Git status fixture unexpectedly passed");
-} catch (error) {
-  if (error.message === "drifted release smoke Git status fixture unexpectedly passed") throw error;
-}
+expectFailure(
+  () => verifyReleaseSmokeGitStatusFixture(driftedWorkflow, dirtyGitStatusInvocation),
+  "drifted release smoke Git status fixture",
+  `release smoke fake Git status fixture must match production exactly: expected ${JSON.stringify(productionStatusInvocation)}, found ${JSON.stringify([`${productionStatusInvocation} --fixture-drift`])}`
+);
 if (!/actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7\.0\.0\n        with:\n          node-version: '24'\n          registry-url: https:\/\/registry\.npmjs\.org\n          package-manager-cache: false\n/.test(workflow)) {
   throw new Error("release workflow must disable setup-node package-manager caching explicitly");
 }
@@ -553,6 +848,15 @@ for (const [authorityClass, ownerJob, marker] of authoritativeJobClasses) {
     throw new Error(`${authorityClass} authority must transitively depend on release-contract`);
   }
 }
+const npmPackageVersionContract = /      - name: Package npm distribution\n        env:\n          RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}\n        run: \|\n          test -n "\$RELEASE_VERSION"\n          node scripts\/package-npm\.mjs --artifacts release-assets --output dist\/npm --version "\$RELEASE_VERSION"/;
+
+function verifyNpmPackageVersionContract(source) {
+  const npmPackagesJob = jobBlock(source, "release", "npm-packages");
+  if (!npmPackageVersionContract.test(npmPackagesJob)) {
+    throw new Error("release workflow violates contract-authoritative package version");
+  }
+}
+
 const jobContracts = [
   [
     "release-contract",
@@ -600,11 +904,6 @@ const jobContracts = [
     /--read-only[\s\S]*--tmpfs \/tmp:rw,noexec,nosuid,size=16m[\s\S]*--mount "type=bind,src=\$PWD\/relay-linux-x86_64,dst=\/opt\/relay,readonly"[\s\S]*--mount "type=bind,src=\$smoke_root,dst=\/smoke"/
   ],
   [
-    "npm-packages",
-    "contract-authoritative package version",
-    /RELEASE_VERSION: \$\{\{ needs\.release-contract\.outputs\.version \}\}[\s\S]*node scripts\/verify-npm-packages\.mjs/
-  ],
-  [
     "archive",
     "pinned attestation action",
     /actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4\.2\.2/
@@ -641,6 +940,36 @@ const jobBlocks = new Map();
 for (const [jobName, name, pattern] of jobContracts) {
   if (!jobBlocks.has(jobName)) jobBlocks.set(jobName, jobBlock(workflow, "release", jobName));
   if (!pattern.test(jobBlocks.get(jobName))) throw new Error(`release workflow violates ${name}`);
+}
+verifyNpmPackageVersionContract(workflow);
+for (const [label, mutate] of [
+  [
+    "missing package-npm version argument",
+    (job) => job.replace(' --version "$RELEASE_VERSION"', "")
+  ],
+  [
+    "detached package version output",
+    (job) =>
+      job.replace(
+        "RELEASE_VERSION: ${{ needs.release-contract.outputs.version }}",
+        "RELEASE_VERSION: ${{ github.ref_name }}"
+      )
+  ],
+  [
+    "overridden package version",
+    (job) =>
+      job.replace(
+        '          test -n "$RELEASE_VERSION"\n          node scripts/package-npm.mjs',
+        '          test -n "$RELEASE_VERSION"\n          RELEASE_VERSION=0.0.0\n          node scripts/package-npm.mjs'
+      )
+  ]
+]) {
+  const weakened = mutateJobBlock(workflow, "release", "npm-packages", mutate);
+  expectFailure(
+    () => verifyNpmPackageVersionContract(weakened),
+    `${label} mutation`,
+    "release workflow violates contract-authoritative package version"
+  );
 }
 for (const runner of [
   "ubuntu-latest",
