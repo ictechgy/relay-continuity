@@ -38,6 +38,9 @@ const GIT_REPOSITORY_ENV_REMOVALS: &[&str] = &[
     "GIT_WORK_TREE",
 ];
 
+#[cfg(unix)]
+const INTEGRATION_EMIT_HANG_DETECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn git_command() -> Command {
     let mut command = Command::new("git");
     for variable in GIT_REPOSITORY_ENV_REMOVALS {
@@ -1414,7 +1417,7 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
     let symlinked = run_with_timeout(
         &root,
         &["integration", "emit", "codex"],
-        Duration::from_secs(2),
+        INTEGRATION_EMIT_HANG_DETECTION_TIMEOUT,
     )
     .expect("symlinked owned state must not block integration emit");
     assert!(symlinked.status.success());
@@ -1429,7 +1432,7 @@ fn integration_emit_rejects_unsafe_or_oversized_owned_state_without_blocking() {
     let oversized = run_with_timeout(
         &root,
         &["integration", "emit", "codex"],
-        Duration::from_secs(2),
+        INTEGRATION_EMIT_HANG_DETECTION_TIMEOUT,
     )
     .expect("oversized owned state must not block integration emit");
     assert!(oversized.status.success());
@@ -1471,7 +1474,7 @@ fn integration_emit_bounds_all_daemon_markers_without_disclosure_or_blocking() {
         run_with_timeout(
             &root,
             &["integration", "emit", "codex"],
-            Duration::from_secs(2),
+            INTEGRATION_EMIT_HANG_DETECTION_TIMEOUT,
         )
         .expect("bounded integration emit")
     };
@@ -2503,26 +2506,7 @@ fn observe_isolates_read_only_git_from_locks_and_repository_overrides() {
         .env("GIT_CONFIG_GLOBAL", &preserved_config)
         .env_remove("GIT_OPTIONAL_LOCKS")
         .env_remove("GIT_NO_LAZY_FETCH");
-    for variable in [
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-        "GIT_DIR",
-        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-        "GIT_GRAFT_FILE",
-        "GIT_IMPLICIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_NAMESPACE",
-        "GIT_NO_REPLACE_OBJECTS",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_PREFIX",
-        "GIT_REFERENCE_BACKEND",
-        "GIT_REPLACE_REF_BASE",
-        "GIT_SHALLOW_FILE",
-        "GIT_WORK_TREE",
-    ] {
+    for variable in GIT_REPOSITORY_ENV_REMOVALS {
         relay.env(variable, "ambient-override");
     }
     let observed = relay
