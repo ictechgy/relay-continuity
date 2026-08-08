@@ -23,3 +23,14 @@ updates:
     labels:
       - dependencies
       - github-actions
+
+  - package-ecosystem: npm
+    directory: /packages/relay
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:00"
+      timezone: Asia/Seoul
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies

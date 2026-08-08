@@ -19,6 +19,7 @@ reviews:
   path_filters:
     - "!target/**"
     - ".github/workflows/**"
+    - ".github/codeql/**"
     - ".github/ISSUE_TEMPLATE/**"
     - ".github/dependabot.yml"
     - ".github/CODEOWNERS"
@@ -47,7 +48,7 @@ reviews:
       instructions: >-
         Verify tests exercise the real CLI or filesystem boundary, clean up their
         state, and do not become timing-dependent or weaken security assertions.
-    - path: ".github/workflows/**"
+    - path: "{.github/workflows/**,.github/codeql/**}"
       instructions: >-
         Review release integrity: locked dependency builds, test coverage, least
         privilege permissions, immutable action references, and artifact checksums.
