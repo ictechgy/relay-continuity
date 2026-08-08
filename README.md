@@ -224,7 +224,8 @@ relay integration codex trust --apply
 ```
 
 The hook is `SessionStart` only and matches `startup` and `resume`,
-and caps model-visible added context at 320 tokens. It never registers a
+and caps model-visible added context at 320 whitespace-delimited words and
+4096 UTF-8 bytes. It never registers a
 `SubagentStart` hook. Hook stdin is bounded and validated in memory; no session
 id, prompt, transcript path, or hook payload is retained. If `.codex/hooks.json`
 is present but not byte-identical to Relay's dedicated file, Relay refuses to

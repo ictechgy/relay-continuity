@@ -1101,7 +1101,7 @@ fn xml_escape(value: &str) -> String {
         .replace('"', "&quot;")
 }
 fn systemd_exec_argument(value: &str) -> Result<String, Box<dyn std::error::Error>> {
-    if value.chars().any(|character| character.is_ascii_control()) {
+    if value.chars().any(char::is_control) {
         return Err("Relay rejected a systemd-unsafe executable path".into());
     }
     let mut encoded = String::with_capacity(value.len());
@@ -1116,7 +1116,7 @@ fn systemd_exec_argument(value: &str) -> Result<String, Box<dyn std::error::Erro
     Ok(format!(r#""{encoded}""#))
 }
 fn systemd_working_directory(value: &str) -> Result<String, Box<dyn std::error::Error>> {
-    if value.chars().any(|character| character.is_ascii_control()) {
+    if value.chars().any(char::is_control) {
         return Err("Relay rejected a control character in the service working directory".into());
     }
     Ok(value
@@ -1141,17 +1141,11 @@ fn service_template_with_executable(
     if !service_kind_is_valid(kind) {
         return Err("Relay rejected an unsupported service manager".into());
     }
-    if executable
-        .chars()
-        .any(|character| character.is_ascii_control())
-    {
+    if executable.chars().any(char::is_control) {
         return Err("Relay rejected a control character in the service executable path".into());
     }
     let working_directory = root.to_string_lossy();
-    if working_directory
-        .chars()
-        .any(|character| character.is_ascii_control())
-    {
+    if working_directory.chars().any(char::is_control) {
         return Err("Relay rejected a control character in the service working directory".into());
     }
     let label = service_id(root);
@@ -3606,6 +3600,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_git_command() -> Command {
+        let mut command = Command::new("git");
+        for variable in GIT_OBSERVATION_ENV_REMOVALS {
+            command.env_remove(variable);
+        }
+        command
+    }
+
     #[test]
     fn hash_is_stable() {
         assert_eq!(hash(b"x"), hash(b"x"));
@@ -4033,27 +4036,27 @@ mod tests {
         assert!(systemd.contains(
             r#"ExecStart=:"/tmp/relay 'quoted' *?[ %%h/$HOME/${HOME}/한글" integration service run"#
         ));
-        assert!(systemd_exec_argument("/tmp/relay-\u{85}").is_ok());
+        assert!(systemd_exec_argument("/tmp/relay-\u{85}").is_err());
         let escaped = systemd_exec_argument("/tmp/relay\\name\"quoted").unwrap();
         assert!(escaped.contains(r"\\"));
         assert!(escaped.contains(r#"\""#));
         assert!(service_template_with_executable(root, "launchd", "/tmp/relay'\"\\name").is_ok());
 
-        for control in ['\0', '\t', '\n', '\r', '\u{1b}', '\u{7f}'] {
+        for control in ['\0', '\t', '\n', '\r', '\u{1b}', '\u{7f}', '\u{85}'] {
             let malicious = format!("/tmp/relay{control}ExecStart=/bin/sh");
             assert!(
                 service_template_with_executable(root, "systemd", &malicious).is_err(),
-                "ASCII control U+{:04X} must be rejected",
+                "control U+{:04X} must be rejected",
                 control as u32
             );
             assert!(
                 service_template_with_executable(root, "launchd", &malicious).is_err(),
-                "launchd must also reject ASCII control U+{:04X}",
+                "launchd must also reject control U+{:04X}",
                 control as u32
             );
         }
 
-        for control in ['\t', '\n', '\r', '\u{1b}', '\u{7f}'] {
+        for control in ['\t', '\n', '\r', '\u{1b}', '\u{7f}', '\u{85}'] {
             let malicious_root = format!("/tmp/worktree{control}Injected=true");
             assert!(
                 service_template_with_executable(
@@ -4269,7 +4272,7 @@ mod tests {
         );
         fs::create_dir_all(&root).unwrap();
         assert!(
-            Command::new("git")
+            test_git_command()
                 .arg("init")
                 .current_dir(&root)
                 .status()
@@ -4278,7 +4281,7 @@ mod tests {
         );
         fs::write(root.join("a.txt"), "one").unwrap();
         assert!(
-            Command::new("git")
+            test_git_command()
                 .args(["add", "a.txt"])
                 .current_dir(&root)
                 .status()
@@ -4286,7 +4289,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            test_git_command()
                 .args([
                     "-c",
                     "user.email=a@b.c",
@@ -4302,7 +4305,7 @@ mod tests {
                 .success()
         );
         assert!(
-            Command::new("git")
+            test_git_command()
                 .args(["branch", "-m", payload])
                 .current_dir(&root)
                 .status()
@@ -4424,18 +4427,18 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        Command::new("git")
+        test_git_command()
             .args(["init"])
             .current_dir(&root)
             .status()
             .unwrap();
         fs::write(root.join("a.txt"), "one").unwrap();
-        Command::new("git")
+        test_git_command()
             .args(["add", "a.txt"])
             .current_dir(&root)
             .status()
             .unwrap();
-        Command::new("git")
+        test_git_command()
             .args([
                 "-c",
                 "user.email=a@b.c",
@@ -4468,18 +4471,18 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        Command::new("git")
+        test_git_command()
             .args(["init"])
             .current_dir(&root)
             .status()
             .unwrap();
         fs::write(root.join("a.txt"), "one").unwrap();
-        Command::new("git")
+        test_git_command()
             .args(["add", "a.txt"])
             .current_dir(&root)
             .status()
             .unwrap();
-        Command::new("git")
+        test_git_command()
             .args([
                 "-c",
                 "user.email=a@b.c",
