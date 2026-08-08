@@ -103,6 +103,41 @@ fn run_with_timeout(
         }
     }
 }
+#[cfg(unix)]
+fn wait_for_path_while_child_runs(
+    child: &mut std::process::Child,
+    path: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if path.exists() {
+            return Ok(());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "service runner exited before readiness with status {status}"
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let kill_error = child.kill().err();
+                let reap_error = child.wait().err();
+                return Err(format!(
+                    "service runner exceeded {timeout:?}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                ));
+            }
+            Err(error) => {
+                let kill_error = child.kill().err();
+                let reap_error = child.wait().err();
+                return Err(format!(
+                    "inspect service runner: {error}; kill_error={kill_error:?}; reap_error={reap_error:?}"
+                ));
+            }
+        }
+    }
+}
 fn run_from(cwd: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(args)
@@ -1651,9 +1686,11 @@ fn service_runner_never_duplicates_an_active_daemon() {
     fs::remove_dir_all(root).expect("remove fixture");
 }
 
+#[cfg(unix)]
 #[test]
 fn service_runner_bootstraps_a_fresh_git_checkout() {
     let root = git_fixture("service-bootstrap-test");
+    let _cleanup = FixtureCleanup(root.clone());
     assert!(!root.join(".relay").exists());
     let mut child = Command::new(env!("CARGO_BIN_EXE_relay"))
         .args(["integration", "service", "run"])
@@ -1662,16 +1699,15 @@ fn service_runner_bootstraps_a_fresh_git_checkout() {
         .spawn()
         .expect("start fresh service runner");
     let ready = root.join(".relay/daemon.ready");
-    for _ in 0..100 {
-        if ready.exists() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
+    wait_for_path_while_child_runs(&mut child, &ready, Duration::from_secs(30))
+        .expect("service runner readiness");
+    let stopped = run(&root, &["daemon", "stop"]);
+    if !stopped.status.success() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("stop failed: {}", String::from_utf8_lossy(&stopped.stderr));
     }
-    assert!(ready.exists());
-    assert!(run(&root, &["daemon", "stop"]).status.success());
     assert!(child.wait().expect("wait service runner").success());
-    fs::remove_dir_all(root).expect("remove fixture");
 }
 
 #[test]
