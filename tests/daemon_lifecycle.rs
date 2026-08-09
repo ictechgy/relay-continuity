@@ -58,6 +58,15 @@ fn sha256(bytes: &[u8]) -> String {
 }
 
 #[cfg(unix)]
+#[test]
+fn state_database_hash_uses_the_sha256_test_vector() {
+    assert_eq!(
+        sha256(b"x"),
+        "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+    );
+}
+
+#[cfg(unix)]
 fn state_database(root: &Path) -> PathBuf {
     state_database_at(root, &test_state_home(root))
 }

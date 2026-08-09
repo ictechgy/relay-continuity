@@ -3613,7 +3613,10 @@ mod tests {
 
     #[test]
     fn hash_is_stable() {
-        assert_eq!(hash(b"x"), hash(b"x"));
+        assert_eq!(
+            hash(b"x"),
+            "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881"
+        );
     }
     #[test]
     fn secret_metadata_is_hidden() {
