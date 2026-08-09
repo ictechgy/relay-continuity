@@ -1605,16 +1605,23 @@ fn state_home_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(base.join("relay"))
 }
 #[cfg(unix)]
-fn state_home() -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let state = state_home_path()?;
-    fs::create_dir_all(&state)?;
-    let metadata = fs::symlink_metadata(&state)?;
+fn initialize_state_home(state: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    fs::create_dir_all(state)?;
+    let metadata = fs::symlink_metadata(state)?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err("Relay refuses a symlinked or non-directory local state path".into());
     }
     #[cfg(unix)]
-    fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-    Ok(state)
+    fs::set_permissions(state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
+    // SQLite's SQLITE_OPEN_NOFOLLOW rejects symlinked ancestor components on
+    // macOS. Canonicalize only after rejecting a symlink at the managed leaf:
+    // this preserves the leaf-level safety boundary while making standard
+    // paths such as /tmp (a symlink to /private/tmp) usable.
+    Ok(fs::canonicalize(state)?)
+}
+#[cfg(unix)]
+fn state_home() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    initialize_state_home(&state_home_path()?)
 }
 #[cfg(unix)]
 fn database_path(root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -3956,6 +3963,32 @@ mod tests {
         assert!(database_header_state(&path).is_err());
         assert_eq!(fs::read_to_string(&outside).unwrap(), "PRECIOUS");
         fs::remove_dir_all(root).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn state_home_canonicalizes_safe_ancestor_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = PathBuf::from(UNIT_TEST_TEMP_ROOT).join(format!(
+            "relay-state-home-canonicalization-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _cleanup = UnitFixtureCleanup(root.clone());
+        let real_parent = root.join("real");
+        let aliased_parent = root.join("alias");
+        fs::create_dir_all(&real_parent).unwrap();
+        symlink(&real_parent, &aliased_parent).unwrap();
+
+        let state = initialize_state_home(&aliased_parent.join("relay")).unwrap();
+        assert_eq!(state, real_parent.join("relay"));
+        assert!(state.is_dir());
+
+        let symlinked_leaf = root.join("symlinked-leaf");
+        symlink(&real_parent, &symlinked_leaf).unwrap();
+        assert!(initialize_state_home(&symlinked_leaf).is_err());
     }
     #[cfg(unix)]
     #[test]
