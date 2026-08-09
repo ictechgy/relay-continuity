@@ -12,10 +12,10 @@ path-based file access that could weaken symlink protections.
 
 Relay is currently prerelease software. Security fixes are provided only for
 the newest published prerelease and the current `main` branch; older release
-candidates are unsupported once a newer candidate is published. The published
-v0.2.0-rc.9 Linux asset requires glibc 2.39. The current release workflow moves
-future Linux x64 artifacts to musl and proves them in older runtime containers,
-but that does not retroactively change rc.9.
+candidates are unsupported once a newer candidate is published. The legacy
+v0.2.0-rc.9 Linux asset requires glibc 2.39. Starting with v0.2.0-rc.10, Linux
+x64 artifacts target musl and are proven in older runtime containers; that does
+not retroactively change rc.9.
 
 SQLite evidence is kept in a user-local state directory outside the Git
 worktree. This is a deliberate trust boundary: a repository can control files

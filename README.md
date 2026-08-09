@@ -5,11 +5,10 @@ It records Git snapshots and explicit check outcomes locally, then renders a sma
 resume card. It does not store source bodies, raw diffs, chats, telemetry, or
 raw command output.
 
-> v0.2.0-rc.9 is a prerelease. It is not a transcript recovery tool and
+> v0.2.0-rc.10 is a prerelease. It is not a transcript recovery tool and
 > cannot universally observe an AI tool's quota, internal reasoning, or UI.
-> The published rc.9 Linux binary requires glibc 2.39; on older Linux systems,
-> build from source until a later tag publishes the portable musl artifact
-> produced by the current release workflow.
+> Its Linux binary is statically linked with musl and is verified on Ubuntu
+> 22.04 and Debian 12 before publication.
 
 ## Trust model
 

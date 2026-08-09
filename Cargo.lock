@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "relay-continuity"
-version = "0.2.0-rc.9"
+version = "0.2.0-rc.10"
 dependencies = [
  "libc",
  "notify",

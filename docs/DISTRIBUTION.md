@@ -11,13 +11,13 @@ The npm wrapper supports `darwin-arm64`, `darwin-x64`, and `linux-x64`. It fails
 closed on unsupported platforms; in particular, Windows is not supported by
 Relay's managed-state safety model.
 
-The published v0.2.0-rc.9 Linux asset was built against glibc 2.39. It is not a
-portable older-distribution artifact. The current release workflow builds
-future `linux-x64` assets for `x86_64-unknown-linux-musl`, rejects dynamic ELF
-dependencies and GLIBC symbol contracts, and executes the exact binary in
-digest-pinned Ubuntu 22.04 and Debian 12 containers before packaging. Keep the
-public filename and npm platform package stable; compatibility comes from the
-binary contract, not a new package name.
+The legacy v0.2.0-rc.9 Linux asset was built against glibc 2.39 and is not a
+portable older-distribution artifact. Starting with v0.2.0-rc.10, `linux-x64`
+assets target `x86_64-unknown-linux-musl`, reject dynamic ELF dependencies and
+GLIBC symbol contracts, and execute the exact binary in digest-pinned Ubuntu
+22.04 and Debian 12 containers before packaging. Keep the public filename and
+npm platform package stable; compatibility comes from the binary contract, not
+a new package name.
 
 ## Release identity gate
 
@@ -104,7 +104,7 @@ render the Formula from the release repository:
 
 ```sh
 node scripts/render-homebrew-formula.mjs \
-  --version 0.2.0-rc.9 \
+  --version 0.2.0-rc.10 \
   --macos-arm64 <sha256> \
   --macos-x64 <sha256> \
   --linux-x64 <sha256> > Formula/relay.rb
