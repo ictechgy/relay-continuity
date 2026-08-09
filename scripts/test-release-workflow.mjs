@@ -103,7 +103,7 @@ function verifyPinnedNode24(source, sourceName, name) {
 function verifyPinnedRustToolchain(source, sourceName, name) {
   const job = jobBlock(source, sourceName, name);
   const matches = job.match(
-    /- uses: dtolnay\/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1\.97\.1\n        with:\n          toolchain: 1\.97\.1/g
+    /- uses: dtolnay\/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # 1\.97\.1\n        with:\n          toolchain: 1\.97\.1/g
   ) ?? [];
   if (matches.length !== 1) {
     throw new Error(
@@ -440,7 +440,7 @@ function verifyReleaseSmokeGitStatusFixture(workflowSource, expected) {
 
 const githubActionPins = new Map([
   ["actions/checkout", { sha: "3d3c42e5aac5ba805825da76410c181273ba90b1", version: "v7.0.1" }],
-  ["dtolnay/rust-toolchain", { sha: "2c7215f132e9ebf062739d9130488b56d53c060c", version: "1.97.1" }],
+  ["dtolnay/rust-toolchain", { sha: "6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772", version: "1.97.1" }],
   ["actions/upload-artifact", { sha: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", version: "v7.0.1" }],
   ["actions/download-artifact", { sha: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", version: "v8.0.1" }],
   ["actions/setup-node", { sha: "820762786026740c76f36085b0efc47a31fe5020", version: "v7.0.0" }],
@@ -487,7 +487,7 @@ const releaseContractWithoutRustToolchain = mutateJobBlock(
   "release-contract",
   (job) =>
     job.replace(
-      "      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # 1.97.1\n        with:\n          toolchain: 1.97.1\n",
+      "      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # 1.97.1\n        with:\n          toolchain: 1.97.1\n",
       ""
     )
 );
