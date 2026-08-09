@@ -31,7 +31,10 @@ const UNIT_TEST_TEMP_ROOT: &str = "/tmp";
 const UNIT_TEST_TEMP_ROOT: &str = r"C:\Windows\Temp";
 
 fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 fn relay_dir(root: &Path) -> PathBuf {
     root.join(".relay")
