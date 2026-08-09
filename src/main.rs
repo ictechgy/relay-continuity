@@ -4374,10 +4374,10 @@ mod tests {
         observe(&root, &c).unwrap();
         let dirty_count = dirty_entries(&root).unwrap().len();
         assert!(dirty_count > MAX_EVENT_PATHS_PER_EVENT);
-        let retained_paths: usize = c
+        let retained_paths: i64 = c
             .query_row("SELECT COUNT(*) FROM event_paths", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(retained_paths, MAX_EVENT_PATHS_PER_EVENT);
+        assert_eq!(retained_paths, MAX_EVENT_PATHS_PER_EVENT as i64);
         c.execute(
             "INSERT INTO annotations(snapshot,text) VALUES(?1,?2)",
             params![snapshot(&root).unwrap(), &annotation_payload],
